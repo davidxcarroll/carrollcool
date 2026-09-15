@@ -16,7 +16,7 @@ const games: Game[] = [
   {
     href: "/snow-throw",
     title: "Snow Throw",
-    thumbnail: "/images/game-snowthrow-2.png",
+    thumbnail: "/images/game-snowthrow.png",
   },
   {
     href: "/dynamite",
