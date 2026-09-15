@@ -10,8 +10,8 @@ let gameState = 'start'; // 'start', 'playing', 'gameOver', 'paused'
 
 // Level configuration
 const LEVELS = {
-    1: { color: '#87CEEB', beeSpeedMultiplier: 1, spawnInterval: 4000 },    // Blue
-    2: { color: '#00D8FD', beeSpeedMultiplier: 1.5, spawnInterval: 3000 },  // Bright Blue
+    1: { color: '#87CEEB', beeSpeedMultiplier: 1, spawnInterval: 4000 },    // Sky
+    2: { color: '#317CFF', beeSpeedMultiplier: 1.5, spawnInterval: 3000 },  // Ocean
     3: { color: '#FFA500', beeSpeedMultiplier: 2, spawnInterval: 2000 },    // Orange
     4: { color: '#8B0000', beeSpeedMultiplier: 3, spawnInterval: 1000 },    // Dark Red
     5: { color: '#000000', beeSpeedMultiplier: 4, spawnInterval: 500 }      // Black
@@ -130,16 +130,28 @@ window.addEventListener('keyup', (e) => {
 
 // Bee properties
 const bees = [];
-const beeImg = new Image();
-beeImg.src = 'images/bee.gif';
 
-// Add jelly image for level 2
-const jellyImg = new Image();
-jellyImg.src = 'images/jelly.gif?' + Date.now();
+// Load GIFs once into the DOM so frames animate; redrawing a new Image
+// every frame never finished loading the jellyfish sprite.
+function loadAnimatedGif(src) {
+    const img = new Image();
+    img.src = src;
+    img.alt = '';
+    img.setAttribute('aria-hidden', 'true');
+    img.style.cssText = 'position:absolute;left:-9999px;width:1px;height:1px;opacity:0;pointer-events:none;';
+    document.body.appendChild(img);
+    return img;
+}
 
-// Add bubbles image for underwater background
-const bubblesImg = new Image();
-bubblesImg.src = 'images/bubbles.gif?' + Date.now();
+function canDrawImage(img) {
+    return img.complete && img.naturalWidth > 0;
+}
+
+const beeImg = loadAnimatedGif('images/bee.gif');
+const jellyImg = loadAnimatedGif('images/jellyfish.gif');
+const bubblesImg = loadAnimatedGif('images/bubbles.gif');
+const BEE_SIZE = 48;
+const JELLY_SIZE = BEE_SIZE * 1.5;
 
 // Add heart image
 const heartImg = new Image();
@@ -241,10 +253,15 @@ function startBeeSpawning() {
     spawnIntervalId = setInterval(spawnBee, LEVELS[currentLevel].spawnInterval);
 }
 
+function spriteSize() {
+    return currentLevel === 2 ? JELLY_SIZE : BEE_SIZE;
+}
+
 function checkCollision(player, bee) {
-    return player.x < bee.x + 48 &&
+    const size = spriteSize();
+    return player.x < bee.x + size &&
            player.x + player.width > bee.x &&
-           player.y < bee.y + 48 &&
+           player.y < bee.y + size &&
            player.y + player.height > bee.y;
 }
 
@@ -391,19 +408,15 @@ function draw() {
     ctx.fillRect(0, 0, canvas.width, canvas.height);
 
     // Add bubbles background pattern for level 2
-    if (currentLevel === 2) {
+    if (currentLevel === 2 && canDrawImage(bubblesImg)) {
         // Create a repeating pattern of bubbles with tighter spacing for seamless effect
-        const bubbleSize = 50;
-        const bubbleSpacing = 55; // Reduced spacing for more seamless pattern
+        const bubbleSize = 150;
+        const bubbleSpacing = 100; // Reduced spacing for more seamless pattern
         const offsetX = (Date.now() / 100) % bubbleSpacing; // Slower animation for bubbles moving up
-        
-        // Create new bubble image each frame to maintain GIF animation
-        const animatedBubblesImg = new Image();
-        animatedBubblesImg.src = 'images/bubbles.gif?' + Date.now();
         
         for (let x = -offsetX; x < canvas.width + bubbleSize; x += bubbleSpacing) {
             for (let y = -offsetX; y < canvas.height + bubbleSize; y += bubbleSpacing) {
-                ctx.drawImage(animatedBubblesImg, x, y, bubbleSize, bubbleSize);
+                ctx.drawImage(bubblesImg, x, y, bubbleSize, bubbleSize);
             }
         }
     }
@@ -416,17 +429,22 @@ function draw() {
     for (const bee of bees) {
         if (currentLevel === 2) {
             // For level 2, draw jelly with counter-clockwise 90 degree rotation
+            const half = JELLY_SIZE / 2;
             ctx.save();
-            ctx.translate(bee.x + 24, bee.y + 24); // Move to center of the image
-            ctx.rotate(-Math.PI / 2); // Rotate counter-clockwise 90 degrees
-            // Create new jelly image each frame to maintain GIF animation
-            const animatedJellyImg = new Image();
-            animatedJellyImg.src = 'images/jelly.gif?' + Date.now();
-            ctx.drawImage(animatedJellyImg, -24, -24, 48, 48); // Draw centered on the rotation point
+            ctx.translate(bee.x + half, bee.y + half);
+            // ctx.rotate(-Math.PI / 2); // Rotate counter-clockwise 90 degrees
+            if (canDrawImage(jellyImg)) {
+                ctx.drawImage(jellyImg, -half, -half, JELLY_SIZE, JELLY_SIZE);
+            } else {
+                ctx.fillStyle = '#7DF9FF';
+                ctx.beginPath();
+                ctx.ellipse(0, 0, 21, 30, 0, 0, Math.PI * 2);
+                ctx.fill();
+            }
             ctx.restore();
         } else {
             // For other levels, draw bees normally
-            ctx.drawImage(beeImg, bee.x, bee.y, 48, 48);
+            ctx.drawImage(beeImg, bee.x, bee.y, BEE_SIZE, BEE_SIZE);
         }
     }
 
