@@ -25,7 +25,7 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
       lang="en"
       className={`h-full ${montrealUltra.variable} ${montrealExtra.variable}`}
     >
-      <body className="relative isolate min-h-full flex flex-col bg-neutral-500 text-white font-montreal-bold-italic-extra-squeezed">
+      <body className="relative isolate min-h-full flex flex-col bg-black text-white font-montreal-bold-italic-extra-squeezed">
 
         {/* NOISE */}
         <div
