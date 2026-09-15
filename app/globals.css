@@ -1,0 +1,10 @@
+@import "tailwindcss";
+
+@theme inline {
+  --font-montreal-bold-italic-ultra-squeezed: var(--font-montreal-ultra),
+    sans-serif;
+  --font-montreal-bold-italic-ultra-squeezed--font-feature-settings: "ss02";
+  --font-montreal-bold-italic-extra-squeezed: var(--font-montreal-extra),
+    sans-serif;
+  --font-montreal-bold-italic-extra-squeezed--font-feature-settings: "ss02";
+}

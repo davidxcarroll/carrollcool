@@ -1,0 +1,2158 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Snow Throw</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      min-height: 100vh;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      background: #03FFFF;
+    }
+    #gameContainer {
+      position: relative;
+      display: inline-block;
+      /* Nested teal/cyan frames matching the start-screen mockup */
+      box-shadow:
+        0 0 0 20px #018282,
+        0 0 0 40px #03A2A3,
+        0 0 0 60px #02CCCC;
+    }
+    canvas {
+      display: block;
+      background: #000;
+    }
+    .explosion-overlay,
+    .impact-overlay,
+    .coin-overlay,
+    .special-slot-overlay {
+      position: absolute;
+      pointer-events: none;
+    }
+    .lava-overlay {
+      position: absolute;
+      left: 0;
+      pointer-events: none;
+      background-image: url('images/lava2.gif');
+      background-repeat: repeat-x;
+      background-position: left bottom;
+      background-size: auto 100%;
+      image-rendering: pixelated;
+    }
+  </style>
+</head>
+<body>
+  <div id="gameContainer">
+    <canvas id="game" width="1200" height="675"></canvas>
+  </div>
+  <script>
+    (function () {
+      const canvas = document.getElementById('game');
+      const gameContainer = document.getElementById('gameContainer');
+      const ctx = canvas.getContext('2d');
+
+      const CANVAS_WIDTH = 1200;
+      const CANVAS_HEIGHT = 675;
+      const SCALE = 1.5;
+      const PLAYER_WIDTH = CANVAS_WIDTH / 32;
+      const PLAYER_HEIGHT = 80 * SCALE;
+      const BALL_RADIUS = 10 * SCALE * .6;
+      const GRAVITY = 0.6;
+      const JUMP_VELOCITY = -14 * Math.sqrt(1.5);
+      const MOVE_SPEED = 6;
+      const THROW_SPEED = 10;
+      /**
+       * Physics baseline in "frames per second of feel".
+       * Before delta-time, speed scaled with the display refresh (often 120Hz on
+       * ProMotion), so 60 made the game feel half as fast. Keep dt for stability;
+       * tune this to match the old snappy feel.
+       */
+      const TARGET_FPS = 70; // between old 60 (too slow) and 120 (too fast); prefer erring slow
+      const FRAME_MS = 1000 / TARGET_FPS;
+      const MAX_DT = 3; // cap after tab-away so players don't tunnel
+      const BALL_RESPAWN_MS = 800;
+
+      const PLATFORM_GAP_LEFT = CANVAS_WIDTH / 16;
+      const PLATFORM_GAP_RIGHT = CANVAS_WIDTH / 16;
+      const PLATFORM_WIDTH = (CANVAS_WIDTH * 4) / 16;
+      const LAVA_HEIGHT = (CANVAS_HEIGHT / 16) * 2;
+      const LAVA_TOP = CANVAS_HEIGHT - LAVA_HEIGHT;
+      const PLATFORM_THICKNESS = CANVAS_HEIGHT / 16;
+      const PLATFORM_TOP = CANVAS_HEIGHT - CANVAS_HEIGHT / 6 - (CANVAS_HEIGHT * 3) / 16;
+      const RIGHT_PLATFORM_LEFT = CANVAS_WIDTH - PLATFORM_GAP_RIGHT - PLATFORM_WIDTH;
+
+      const RESPAWN_DELAY_MS = 1000;
+      const EXPLOSION_DISPLAY_MS = 280;
+      const IMPACT_DISPLAY_MS = 400;
+      const GAME_OVER_DISPLAY_MS = 2000;
+      const COIN_DURATION_MS = 2000;
+      const COIN_INTERVAL_MS = 2000;
+      const COIN_SIZE = PLAYER_WIDTH;
+      // Vertical pixels gained from a full jump (used to bound coin height)
+      const JUMP_APEX = (JUMP_VELOCITY * JUMP_VELOCITY) / (2 * GRAVITY);
+      const COUNTDOWN_DURATION_MS = 4000;   // 3, 2, 1, fight! (~1s each)
+      const THROW_BLOCK_AFTER_HIT_MS = 2500; // both players can't throw until this time after a hit
+      const MAX_HP = 6;
+      const MAX_SPECIAL = 3;
+      const SPECIAL_SLOT_SPIN_MS = 1500;
+      const SPECIAL_SLOT_FLASH_MS = 200;
+      const SPECIAL_GIFS = [
+        'images/special-bounce.gif',
+        'images/special-explode.gif',
+        'images/special-growball.gif',
+        'images/special-health.gif',
+        'images/special-shrink.gif'
+      ];
+      const SPECIAL_BY_NAME = {
+        bounce: 0,
+        explode: 1,
+        growball: 2,
+        health: 3,
+        shrink: 4
+      };
+      const HEALTH_ICON_HOLD_MS = 100;
+      const HEALTH_HEAL_STEP_MS = 100;
+      const EXPLODE_MAX_CHARGES = 3;
+      const EXPLODE_DAMAGE = 3;
+      /** Players within this distance of a mid-air detonation still take explode damage. */
+      const EXPLODE_BLAST_RADIUS = 320;
+      const EXPLODE_BALL_COLOR = '#f80';
+      const BOUNCE_MAX_CHARGES = 6;
+      const BOUNCE_BALL_COLOR = '#7CFC00'; // lime green
+      const GROWBALL_MAX_CHARGES = 6;
+      const GROWBALL_SCALE = 8;
+      const GROWBALL_RADIUS = BALL_RADIUS * GROWBALL_SCALE;
+      const GROWBALL_BALL_COLOR = '#888'; // grey
+      const SHRINK_DURATION_MS = 10000;
+      const SHRINK_SEGMENTS = 10;
+      // Short enough that a standing throw (ball at mid-body) clears a standing shrunk player.
+      const SHRINK_HEIGHT = PLAYER_HEIGHT / 2 - BALL_RADIUS - 2;
+      const SHRINK_BALL_COLOR = '#ff0';
+      const HP_PAD_UI = 20;
+      const HP_BOX_UI = 14;
+      const HP_GAP_UI = 6;
+      const HP_Y_UI = 18;
+      const SPECIAL_Y_UI = HP_Y_UI + HP_BOX_UI + HP_GAP_UI + 4;
+      const SPECIAL_ICON_SCALE = 0.66;
+      const SPECIAL_ICON_SIZE = PLAYER_WIDTH * 1.5 * SPECIAL_ICON_SCALE;
+      const SPECIAL_ICON_METER_GAP = HP_GAP_UI;
+      /** Set to false to skip the "both players throw" start screen (handy for local dev). */
+      const SHOW_START_SCREEN = true;
+      const HAT_SIZE = PLAYER_WIDTH * 1.5;
+      const ROJO_HAT_OPTIONS = [
+        'football',
+        'racing',
+        'wild west',
+        'baseball',
+        'mimikyu',
+        'glasses'
+      ];
+      const ROJO_HAT_GIFS = [
+        'images/hat-rojo-football.gif',
+        'images/hat-rojo-racing.gif',
+        'images/hat-rojo-wildwest.gif',
+        'images/hat-rojo-baseball.gif',
+        'images/hat-rojo-mimikyu.gif',
+        'images/hat-rojo-glasses.gif'
+      ];
+      const AZUL_HAT_OPTIONS = [
+        'sombrero',
+        'pikachu',
+        'cool guy',
+        'baseball',
+        'lump hat',
+        'amongus'
+      ];
+      const AZUL_HAT_GIFS = [
+        'images/hat-azul-sombrero.gif',
+        'images/hat-azul-pikachu.gif',
+        'images/hat-azul-coolguy.gif',
+        'images/hat-azul-baseball.gif',
+        'images/hat-azul-lump.gif',
+        'images/hat-azul-amongus.gif'
+      ];
+      /** One coin fills special meter; URL `?quickSpecial=1` enables for local testing. */
+      const DEV_QUICK_SPECIAL_DEFAULT = false;
+      /** Force reel: `bounce` | `explode` | `growball` | `health` | `shrink`; URL `?special=` only. */
+      const DEV_SPECIAL_DEFAULT = '';
+
+      const urlParams = new URLSearchParams(window.location.search);
+      const quickSpecialEnabled =
+        urlParams.get('quickSpecial') === '1' || DEV_QUICK_SPECIAL_DEFAULT;
+      const specialParam = (urlParams.get('special') || DEV_SPECIAL_DEFAULT || '')
+        .toLowerCase()
+        .trim();
+      let forcedSpecialIndex = null;
+      if (specialParam && Object.prototype.hasOwnProperty.call(SPECIAL_BY_NAME, specialParam)) {
+        forcedSpecialIndex = SPECIAL_BY_NAME[specialParam];
+      }
+
+      const keys = {};
+      let lastFrameTime = 0;
+
+      function clearHeldKeys() {
+        keys['a'] = keys['d'] = keys['w'] = keys['s'] = false;
+        keys['j'] = keys['l'] = keys['i'] = keys['k'] = false;
+      }
+
+      const thrownBalls = []; // each: { x, y, speed, owner } — owner 1 or 2, speed > 0 = right, < 0 = left
+      let ballAvailableAt = 0;
+      let ballAvailableAt2 = 0;
+      let respawnAt = null;
+      let respawnAt2 = null;
+      let countdownUntil = null;       // timestamp when countdown ends; while in past or set, countdown is over
+      let lastCountdownStep = -1;      // 3, 2, 1, or 0 (fight) — for one-shot countdown sounds
+      let throwBlockedUntilBoth = 0;   // both players can't throw until this time (balls blink while blocked)
+      let hp1 = MAX_HP;
+      let hp2 = MAX_HP;
+      let special1 = 0;
+      let special2 = 0;
+      let specialSlot1 = null;
+      let specialSlot2 = null;
+      /** Health power-up timing while reel shows health; cleared when heal finishes or player is hit. */
+      let healthPowerupP1 = null; // { phase: 'hold'|'heal', nextEventAt: number }
+      let healthPowerupP2 = null;
+      /** Explode charges remaining (0 = inactive). */
+      let explodeCharges1 = 0;
+      let explodeCharges2 = 0;
+      /** Bounce charges remaining (0 = inactive). */
+      let bounceCharges1 = 0;
+      let bounceCharges2 = 0;
+      /** Growball charges remaining (0 = inactive). */
+      let growballCharges1 = 0;
+      let growballCharges2 = 0;
+      /** Shrink ends at this timestamp (0 = inactive). */
+      let shrinkUntil1 = 0;
+      let shrinkUntil2 = 0;
+      let gameOver = null; // { winnerColor: 'Rojo'|'Azul', until: timestamp }
+      let gameStarted = false; // false until both players hit throw (S / K) to start
+      let paused = false;
+      let pauseStartedAt = 0;
+      let rojoReady = false;
+      let azulReady = false;
+      let startGameAt = null; // brief delay after both ready so lobby throws are visible
+      /** Hat selection: -1 = none (default), else option index. Purely decorative. */
+      let rojoHatIndex = -1;
+      let azulHatIndex = -1;
+      let explosionEl = null;
+      let explosionEl2 = null;
+      let impactEl = null;
+
+      const explosionImg = new Image();
+      explosionImg.src = 'images/explosion.gif';
+      const impactImg = new Image();
+      impactImg.src = 'images/impact.gif';
+      const coinImg = new Image();
+      coinImg.src = 'images/coin.gif';
+      // Preload special icons so reel swaps don't re-fetch / re-decode
+      for (let i = 0; i < SPECIAL_GIFS.length; i++) {
+        const img = new Image();
+        img.src = SPECIAL_GIFS[i];
+      }
+      function preloadHatImages(srcs) {
+        const imgs = [];
+        for (let i = 0; i < srcs.length; i++) {
+          const img = new Image();
+          img.src = srcs[i];
+          imgs.push(img);
+        }
+        return imgs;
+      }
+      const rojoHatImgs = preloadHatImages(ROJO_HAT_GIFS);
+      const azulHatImgs = preloadHatImages(AZUL_HAT_GIFS);
+
+      let lavaEl = null;
+      function ensureLavaOverlay() {
+        if (lavaEl) return lavaEl;
+        lavaEl = document.createElement('div');
+        lavaEl.className = 'lava-overlay';
+        lavaEl.style.top = LAVA_TOP + 'px';
+        lavaEl.style.width = CANVAS_WIDTH + 'px';
+        lavaEl.style.height = LAVA_HEIGHT + 'px';
+        gameContainer.appendChild(lavaEl);
+        return lavaEl;
+      }
+      function setLavaOverlayVisible(visible) {
+        const el = ensureLavaOverlay();
+        el.style.display = visible ? 'block' : 'none';
+      }
+
+      // Coin state — one per player platform
+      let coin1 = { el: null, active: false, nextShowAt: 0, showUntil: 0, x: 0, y: 0 };
+      let coin2 = { el: null, active: false, nextShowAt: 0, showUntil: 0, x: 0, y: 0 };
+
+      let bgMusic = null;
+      const soundCache = Object.create(null);
+      const SFX_SRCS = [
+        'sound/begin2.wav',
+        'sound/boulder2.wav',
+        'sound/bounce2.wav',
+        'sound/coin.wav',
+        'sound/coin2.wav',
+        'sound/count2.wav',
+        'sound/fire2.wav',
+        'sound/hit-ball2.wav',
+        'sound/hit2.wav',
+        'sound/jump.wav',
+        'sound/pop2.wav',
+        'sound/powerup2.wav',
+        'sound/special2.wav',
+        'sound/throw2.wav',
+        'sound/win2.wav'
+      ];
+
+      function preloadSounds() {
+        for (let i = 0; i < SFX_SRCS.length; i++) {
+          const src = SFX_SRCS[i];
+          if (soundCache[src]) continue;
+          try {
+            const a = new Audio();
+            a.preload = 'auto';
+            a.src = src;
+            a.load();
+            soundCache[src] = a;
+          } catch (e) {}
+        }
+      }
+
+      function initBgMusic() {
+        if (bgMusic) return;
+        try {
+          bgMusic = new Audio('sound/music-sports.mp3');
+          bgMusic.volume = 0.4;
+          bgMusic.loop = true;
+        } catch (e) {}
+      }
+      function playBgMusic() {
+        initBgMusic();
+        if (bgMusic) bgMusic.play().catch(function () {});
+      }
+      function pauseBgMusic() {
+        if (bgMusic) bgMusic.pause();
+      }
+
+      /** Clone from a preloaded buffer so overlapping / rapid SFX don't miss. */
+      function playSound(src) {
+        try {
+          let base = soundCache[src];
+          if (!base) {
+            base = new Audio();
+            base.preload = 'auto';
+            base.src = src;
+            base.load();
+            soundCache[src] = base;
+          }
+          const a = base.cloneNode(true);
+          a.volume = 0.6;
+          const p = a.play();
+          if (p && typeof p.catch === 'function') p.catch(function () {});
+        } catch (e) {}
+      }
+
+      preloadSounds();
+      initBgMusic();
+
+      function getSpecialSlotRect(isLeft) {
+        const size = SPECIAL_ICON_SIZE;
+        const left = isLeft
+          ? HP_PAD_UI
+          : CANVAS_WIDTH - HP_PAD_UI - size;
+        return { left, top: SPECIAL_Y_UI, size };
+      }
+
+      function getSpecialMeterLayout(isLeft, withIcon, segments) {
+        const count = segments != null ? segments : MAX_SPECIAL;
+        const meterW = count * HP_BOX_UI + (count - 1) * HP_GAP_UI;
+        if (!withIcon) {
+          const x = isLeft ? HP_PAD_UI : CANVAS_WIDTH - HP_PAD_UI - meterW;
+          return { x, y: SPECIAL_Y_UI };
+        }
+        const icon = getSpecialSlotRect(isLeft);
+        const y = SPECIAL_Y_UI + (icon.size - HP_BOX_UI) / 2;
+        const x = isLeft
+          ? icon.left + icon.size + SPECIAL_ICON_METER_GAP
+          : icon.left - SPECIAL_ICON_METER_GAP - meterW;
+        return { x, y };
+      }
+
+      function clearSpecialSlot(isPlayer1) {
+        const slot = isPlayer1 ? specialSlot1 : specialSlot2;
+        if (!slot) return;
+        if (slot.el && slot.el.parentNode) slot.el.remove();
+        if (isPlayer1) specialSlot1 = null;
+        else specialSlot2 = null;
+      }
+
+      function isShrunk(isPlayer1) {
+        return (isPlayer1 ? shrinkUntil1 : shrinkUntil2) > Date.now();
+      }
+
+      function getPlayerHeight(isPlayer1) {
+        return isShrunk(isPlayer1) ? SHRINK_HEIGHT : PLAYER_HEIGHT;
+      }
+
+      function getShrinkSegmentsLeft(isPlayer1) {
+        const until = isPlayer1 ? shrinkUntil1 : shrinkUntil2;
+        if (!until) return 0;
+        const remaining = until - Date.now();
+        if (remaining <= 0) return 0;
+        return Math.min(SHRINK_SEGMENTS, Math.ceil(remaining / 1000));
+      }
+
+      /** Grow/shrink while keeping feet at the same Y. */
+      function setPlayerHeightKeepingFeet(isPlayer1, nextHeight) {
+        const p = isPlayer1 ? player : player2;
+        const feetY = p.y + getPlayerHeight(isPlayer1);
+        p.y = feetY - nextHeight;
+      }
+
+      function clearPlayerSpecial(isPlayer1) {
+        // Restore full height from feet even if the timer just expired (isShrunk already false).
+        if (isPlayer1 ? shrinkUntil1 : shrinkUntil2) {
+          const p = isPlayer1 ? player : player2;
+          const feetY = p.y + SHRINK_HEIGHT;
+          p.y = feetY - PLAYER_HEIGHT;
+        }
+        if (isPlayer1) {
+          special1 = 0;
+          healthPowerupP1 = null;
+          explodeCharges1 = 0;
+          bounceCharges1 = 0;
+          growballCharges1 = 0;
+          shrinkUntil1 = 0;
+          clearSpecialSlot(true);
+        } else {
+          special2 = 0;
+          healthPowerupP2 = null;
+          explodeCharges2 = 0;
+          bounceCharges2 = 0;
+          growballCharges2 = 0;
+          shrinkUntil2 = 0;
+          clearSpecialSlot(false);
+        }
+      }
+
+      function finishHealthPowerup(isPlayer1) {
+        clearPlayerSpecial(isPlayer1);
+      }
+
+      function finishExplodePowerup(isPlayer1) {
+        clearPlayerSpecial(isPlayer1);
+      }
+
+      function finishBouncePowerup(isPlayer1) {
+        clearPlayerSpecial(isPlayer1);
+      }
+
+      function finishGrowballPowerup(isPlayer1) {
+        clearPlayerSpecial(isPlayer1);
+      }
+
+      function finishShrinkPowerup(isPlayer1) {
+        clearPlayerSpecial(isPlayer1);
+      }
+
+      function startShrink(isPlayer1) {
+        setPlayerHeightKeepingFeet(isPlayer1, SHRINK_HEIGHT);
+        if (isPlayer1) shrinkUntil1 = Date.now() + SHRINK_DURATION_MS;
+        else shrinkUntil2 = Date.now() + SHRINK_DURATION_MS;
+      }
+
+      function hasExplode(isPlayer1) {
+        return (isPlayer1 ? explodeCharges1 : explodeCharges2) > 0;
+      }
+
+      function hasBounce(isPlayer1) {
+        return (isPlayer1 ? bounceCharges1 : bounceCharges2) > 0;
+      }
+
+      function hasGrowball(isPlayer1) {
+        return (isPlayer1 ? growballCharges1 : growballCharges2) > 0;
+      }
+
+      function getBallRadius(b) {
+        return b && b.isGrowball ? GROWBALL_RADIUS : BALL_RADIUS;
+      }
+
+      function updateShrinkPowerups(now) {
+        if (shrinkUntil1 && now >= shrinkUntil1) finishShrinkPowerup(true);
+        if (shrinkUntil2 && now >= shrinkUntil2) finishShrinkPowerup(false);
+      }
+
+      function updateHealthPowerups(now) {
+        function tickOne(isP1, st) {
+          if (!st) return;
+          const hpNow = isP1 ? hp1 : hp2;
+          if (st.phase === 'hold') {
+            if (now < st.nextEventAt) return;
+            if (hpNow >= MAX_HP) {
+              finishHealthPowerup(isP1);
+              return;
+            }
+            st.phase = 'heal';
+            st.nextEventAt = now;
+          }
+          if (st.phase === 'heal' && now >= st.nextEventAt) {
+            if (isP1) {
+              if (hp1 < MAX_HP) hp1++;
+            } else if (hp2 < MAX_HP) {
+              hp2++;
+            }
+            const h = isP1 ? hp1 : hp2;
+            if (h >= MAX_HP) {
+              finishHealthPowerup(isP1);
+            } else {
+              st.nextEventAt = now + HEALTH_HEAL_STEP_MS;
+            }
+          }
+        }
+        tickOne(true, healthPowerupP1);
+        tickOne(false, healthPowerupP2);
+      }
+
+      function startSpecialSlot(isPlayer1) {
+        if (isPlayer1 ? specialSlot1 : specialSlot2) return;
+        const rect = getSpecialSlotRect(isPlayer1);
+        const el = document.createElement('img');
+        el.className = 'special-slot-overlay';
+        el.style.width = rect.size + 'px';
+        el.style.height = rect.size + 'px';
+        el.style.left = rect.left + 'px';
+        el.style.top = rect.top + 'px';
+        el.src = SPECIAL_GIFS[0];
+        gameContainer.appendChild(el);
+        const state = { startAt: Date.now(), finalIndex: null, el, lastFrame: -1 };
+        if (isPlayer1) specialSlot1 = state;
+        else specialSlot2 = state;
+      }
+
+      function syncSpecialSlotOverlays() {
+        function tick(slot, isPlayer1) {
+          if (!slot) return;
+          const elapsed = Date.now() - slot.startAt;
+          let idx;
+          if (elapsed < SPECIAL_SLOT_SPIN_MS) {
+            idx = Math.floor(elapsed / SPECIAL_SLOT_FLASH_MS) % SPECIAL_GIFS.length;
+          } else {
+            if (slot.finalIndex === null) {
+              slot.finalIndex =
+                forcedSpecialIndex !== null
+                  ? forcedSpecialIndex
+                  : Math.floor(Math.random() * SPECIAL_GIFS.length);
+              playSound('sound/powerup2.wav');
+              if (slot.finalIndex === SPECIAL_BY_NAME.health) {
+                if (isPlayer1) {
+                  if (!healthPowerupP1) {
+                    healthPowerupP1 = {
+                      phase: 'hold',
+                      nextEventAt: Date.now() + HEALTH_ICON_HOLD_MS
+                    };
+                  }
+                } else if (!healthPowerupP2) {
+                  healthPowerupP2 = {
+                    phase: 'hold',
+                    nextEventAt: Date.now() + HEALTH_ICON_HOLD_MS
+                  };
+                }
+              } else if (slot.finalIndex === SPECIAL_BY_NAME.explode) {
+                if (isPlayer1) explodeCharges1 = EXPLODE_MAX_CHARGES;
+                else explodeCharges2 = EXPLODE_MAX_CHARGES;
+              } else if (slot.finalIndex === SPECIAL_BY_NAME.bounce) {
+                if (isPlayer1) bounceCharges1 = BOUNCE_MAX_CHARGES;
+                else bounceCharges2 = BOUNCE_MAX_CHARGES;
+              } else if (slot.finalIndex === SPECIAL_BY_NAME.growball) {
+                if (isPlayer1) growballCharges1 = GROWBALL_MAX_CHARGES;
+                else growballCharges2 = GROWBALL_MAX_CHARGES;
+              } else if (slot.finalIndex === SPECIAL_BY_NAME.shrink) {
+                startShrink(isPlayer1);
+              }
+            }
+            idx = slot.finalIndex;
+          }
+          if (idx !== slot.lastFrame) {
+            slot.el.src = SPECIAL_GIFS[idx];
+            slot.lastFrame = idx;
+          }
+        }
+        tick(specialSlot1, true);
+        tick(specialSlot2, false);
+      }
+
+      let player = {
+        x: PLATFORM_GAP_LEFT + PLATFORM_WIDTH / 2 - PLAYER_WIDTH / 2,
+        y: PLATFORM_TOP - PLAYER_HEIGHT,
+        velY: 0
+      };
+
+      let player2 = {
+        x: RIGHT_PLATFORM_LEFT + PLATFORM_WIDTH / 2 - PLAYER_WIDTH / 2,
+        y: PLATFORM_TOP - PLAYER_HEIGHT,
+        velY: 0
+      };
+
+      function getHeldBallCenter() {
+        const r = hasGrowball(true) ? GROWBALL_RADIUS : BALL_RADIUS;
+        return {
+          x: player.x + PLAYER_WIDTH + r,
+          y: player.y + getPlayerHeight(true) / 2
+        };
+      }
+
+      function getHeldBallCenter2() {
+        const r = hasGrowball(false) ? GROWBALL_RADIUS : BALL_RADIUS;
+        return {
+          x: player2.x - r,
+          y: player2.y + getPlayerHeight(false) / 2
+        };
+      }
+
+      function platformOverlapX() {
+        return (
+          player.x + PLAYER_WIDTH > PLATFORM_GAP_LEFT &&
+          player.x < PLATFORM_GAP_LEFT + PLATFORM_WIDTH
+        );
+      }
+
+      function platformOverlapX2() {
+        return (
+          player2.x + PLAYER_WIDTH > RIGHT_PLATFORM_LEFT &&
+          player2.x < RIGHT_PLATFORM_LEFT + PLATFORM_WIDTH
+        );
+      }
+
+      function isOnPlatform() {
+        const feetY = player.y + getPlayerHeight(true);
+        return (
+          feetY >= PLATFORM_TOP - 1 &&
+          feetY <= PLATFORM_TOP + 4 &&
+          platformOverlapX()
+        );
+      }
+
+      function isOnPlatform2() {
+        const feetY = player2.y + getPlayerHeight(false);
+        return (
+          feetY >= PLATFORM_TOP - 1 &&
+          feetY <= PLATFORM_TOP + 4 &&
+          platformOverlapX2()
+        );
+      }
+
+      function isInLava() {
+        return player.y + getPlayerHeight(true) >= LAVA_TOP;
+      }
+
+      function isInLava2() {
+        return player2.y + getPlayerHeight(false) >= LAVA_TOP;
+      }
+
+      function respawnOnPlatform() {
+        player.x = PLATFORM_GAP_LEFT + PLATFORM_WIDTH / 2 - PLAYER_WIDTH / 2;
+        player.y = PLATFORM_TOP - getPlayerHeight(true);
+        player.velY = 0;
+      }
+
+      function respawnOnPlatform2() {
+        player2.x = RIGHT_PLATFORM_LEFT + PLATFORM_WIDTH / 2 - PLAYER_WIDTH / 2;
+        player2.y = PLATFORM_TOP - getPlayerHeight(false);
+        player2.velY = 0;
+      }
+
+      function hpColor(hp) {
+        if (hp >= 5) return '#2ecc71'; // 6/6, 5/6
+        if (hp >= 3) return '#f1c40f'; // 4/6, 3/6
+        return '#e74c3c'; // 2/6, 1/6
+      }
+
+      function resetMatchState() {
+        gameOver = null;
+        hp1 = MAX_HP;
+        hp2 = MAX_HP;
+        special1 = 0;
+        special2 = 0;
+        respawnAt = null;
+        respawnAt2 = null;
+        thrownBalls.length = 0;
+        lastCountdownStep = -1;
+        clearHeldKeys(); // no movement / jump / throw buffered into countdown
+        ballAvailableAt = 1e12;  // no ball until countdown ends
+        ballAvailableAt2 = 1e12;
+        throwBlockedUntilBoth = 0;
+        if (explosionEl) { explosionEl.remove(); explosionEl = null; }
+        if (explosionEl2) { explosionEl2.remove(); explosionEl2 = null; }
+        if (impactEl) { impactEl.remove(); impactEl = null; }
+        hideCoin(coin1); coin1.nextShowAt = 0;
+        hideCoin(coin2); coin2.nextShowAt = 0;
+        healthPowerupP1 = null;
+        healthPowerupP2 = null;
+        explodeCharges1 = 0;
+        explodeCharges2 = 0;
+        bounceCharges1 = 0;
+        bounceCharges2 = 0;
+        growballCharges1 = 0;
+        growballCharges2 = 0;
+        shrinkUntil1 = 0;
+        shrinkUntil2 = 0;
+        clearSpecialSlot(true);
+        clearSpecialSlot(false);
+        respawnOnPlatform();
+        respawnOnPlatform2();
+      }
+
+      function newGame() {
+        resetMatchState();
+        countdownUntil = Date.now() + COUNTDOWN_DURATION_MS;
+      }
+
+      function returnToStartScreen() {
+        resetMatchState();
+        countdownUntil = null;
+        gameStarted = false;
+        paused = false;
+        pauseStartedAt = 0;
+        rojoReady = false;
+        azulReady = false;
+        startGameAt = null;
+        placePlayersOnStartFloor();
+        // Lobby: both players hold a ball to throw-to-ready
+        ballAvailableAt = 0;
+        ballAvailableAt2 = 0;
+        thrownBalls.length = 0;
+        setLavaOverlayVisible(false);
+      }
+
+      /** Cosmetic throw on the start screen — no damage / specials. */
+      function throwLobbyBall(isPlayer1) {
+        playSound('sound/throw2.wav');
+        if (isPlayer1) {
+          const pos = getHeldBallCenter();
+          thrownBalls.push({
+            x: pos.x,
+            y: pos.y,
+            speed: THROW_SPEED,
+            owner: 1,
+            lobby: true,
+            isExplode: false,
+            isBounce: false,
+            isGrowball: false,
+            isShrink: false
+          });
+          ballAvailableAt = 1e12;
+        } else {
+          const pos = getHeldBallCenter2();
+          thrownBalls.push({
+            x: pos.x,
+            y: pos.y,
+            speed: -THROW_SPEED,
+            owner: 2,
+            lobby: true,
+            isExplode: false,
+            isBounce: false,
+            isGrowball: false,
+            isShrink: false
+          });
+          ballAvailableAt2 = 1e12;
+        }
+      }
+
+      /** Shift absolute deadlines so real time spent paused doesn't advance game timers. */
+      function shiftDeadlinesBy(deltaMs) {
+        if (!deltaMs) return;
+        if (ballAvailableAt) ballAvailableAt += deltaMs;
+        if (ballAvailableAt2) ballAvailableAt2 += deltaMs;
+        if (respawnAt !== null) respawnAt += deltaMs;
+        if (respawnAt2 !== null) respawnAt2 += deltaMs;
+        if (countdownUntil !== null) countdownUntil += deltaMs;
+        if (throwBlockedUntilBoth) throwBlockedUntilBoth += deltaMs;
+        if (shrinkUntil1) shrinkUntil1 += deltaMs;
+        if (shrinkUntil2) shrinkUntil2 += deltaMs;
+        if (gameOver) gameOver.until += deltaMs;
+        if (healthPowerupP1) healthPowerupP1.nextEventAt += deltaMs;
+        if (healthPowerupP2) healthPowerupP2.nextEventAt += deltaMs;
+        if (coin1.nextShowAt) coin1.nextShowAt += deltaMs;
+        if (coin1.showUntil) coin1.showUntil += deltaMs;
+        if (coin2.nextShowAt) coin2.nextShowAt += deltaMs;
+        if (coin2.showUntil) coin2.showUntil += deltaMs;
+        if (specialSlot1) specialSlot1.startAt += deltaMs;
+        if (specialSlot2) specialSlot2.startAt += deltaMs;
+      }
+
+      function setPaused(next) {
+        if (!gameStarted || next === paused) return;
+        if (next) {
+          paused = true;
+          pauseStartedAt = Date.now();
+          clearHeldKeys();
+          pauseBgMusic();
+        } else {
+          shiftDeadlinesBy(Date.now() - pauseStartedAt);
+          paused = false;
+          pauseStartedAt = 0;
+          lastFrameTime = 0;
+          playBgMusic();
+        }
+      }
+
+      /** Cycle hat: none → 1..6 → none. dir is -1 (left) or +1 (right). */
+      function cycleHatIndex(current, dir, optionCount) {
+        const total = optionCount + 1; // includes "none"
+        const asZeroBased = current + 1; // -1 → 0, 0 → 1, ...
+        const next = (asZeroBased + dir + total * 10) % total;
+        return next - 1;
+      }
+
+      /** Pin decorative hat to the top of a player token. Black in the GIF is treated as transparent. */
+      function drawPlayerHat(px, py, pw, hatIndex, hatImgs) {
+        if (hatIndex < 0 || !hatImgs[hatIndex]) return;
+        const img = hatImgs[hatIndex];
+        if (!img.complete || !img.naturalWidth) return;
+        const size = HAT_SIZE;
+        const hx = px + (pw - size) / 2;
+        const hy = py - size;
+        ctx.save();
+        ctx.imageSmoothingEnabled = false;
+        ctx.globalCompositeOperation = 'screen';
+        ctx.drawImage(img, hx, hy, size, size);
+        ctx.restore();
+      }
+
+      function clampPlayerX() {
+        if (player.x < 0) player.x = 0;
+        if (player.x + PLAYER_WIDTH > CANVAS_WIDTH) player.x = CANVAS_WIDTH - PLAYER_WIDTH;
+      }
+
+      function clampPlayerX2() {
+        if (player2.x < 0) player2.x = 0;
+        if (player2.x + PLAYER_WIDTH > CANVAS_WIDTH) player2.x = CANVAS_WIDTH - PLAYER_WIDTH;
+      }
+
+      function ballHitPlayer(b, isPlayer1) {
+        const p = isPlayer1 ? player : player2;
+        const h = getPlayerHeight(isPlayer1);
+        const r = getBallRadius(b);
+        return (
+          b.x + r > p.x &&
+          b.x - r < p.x + PLAYER_WIDTH &&
+          b.y + r > p.y &&
+          b.y - r < p.y + h
+        );
+      }
+
+      function ballsOverlap(a, b) {
+        const dx = b.x - a.x;
+        const dy = b.y - a.y;
+        const minDist = getBallRadius(a) + getBallRadius(b);
+        return (dx * dx + dy * dy) <= minDist * minDist;
+      }
+
+      /** Circle vs player AABB: true if (cx, cy) is within radius of the player's body. */
+      function playerInRadius(isPlayer1, cx, cy, radius) {
+        const p = isPlayer1 ? player : player2;
+        const h = getPlayerHeight(isPlayer1);
+        const closestX = Math.max(p.x, Math.min(cx, p.x + PLAYER_WIDTH));
+        const closestY = Math.max(p.y, Math.min(cy, p.y + h));
+        const dx = cx - closestX;
+        const dy = cy - closestY;
+        return dx * dx + dy * dy <= radius * radius;
+      }
+
+      /**
+       * Explode ball detonated mid-air: damage the opposing player if they are in the blast radius.
+       * Visual/SFX are handled by the detonation site (detached explosion + hit sound).
+       * Returns true if damage was applied.
+       */
+      function applyExplodeBlast(cx, cy, explodeOwner) {
+        const targetIsP1 = explodeOwner === 2;
+        if ((targetIsP1 ? respawnAt : respawnAt2) !== null) return false;
+        if (!playerInRadius(targetIsP1, cx, cy, EXPLODE_BLAST_RADIUS)) return false;
+        throwBlockedUntilBoth = Date.now() + THROW_BLOCK_AFTER_HIT_MS;
+        applyDamage(targetIsP1, EXPLODE_DAMAGE);
+        return true;
+      }
+
+      function applyDamage(isPlayer1, amount) {
+        if (isPlayer1) {
+          hp1 = Math.max(0, hp1 - amount);
+          clearPlayerSpecial(true);
+          if (hp1 <= 0) {
+            playSound('sound/win2.wav');
+            gameOver = { winnerColor: 'Azul', until: Date.now() + GAME_OVER_DISPLAY_MS };
+          } else {
+            respawnAt = Date.now() + RESPAWN_DELAY_MS;
+          }
+        } else {
+          hp2 = Math.max(0, hp2 - amount);
+          clearPlayerSpecial(false);
+          if (hp2 <= 0) {
+            playSound('sound/win2.wav');
+            gameOver = { winnerColor: 'Rojo', until: Date.now() + GAME_OVER_DISPLAY_MS };
+          } else {
+            respawnAt2 = Date.now() + RESPAWN_DELAY_MS;
+          }
+        }
+      }
+
+      function showExplosionAt(isPlayer1, cx, cy) {
+        if (isPlayer1) {
+          if (explosionEl) explosionEl.remove();
+          explosionEl = makeExplosionEl(cx, cy);
+          gameContainer.appendChild(explosionEl);
+          setTimeout(function () {
+            if (explosionEl) { explosionEl.remove(); explosionEl = null; }
+          }, EXPLOSION_DISPLAY_MS);
+        } else {
+          if (explosionEl2) explosionEl2.remove();
+          explosionEl2 = makeExplosionEl(cx, cy);
+          gameContainer.appendChild(explosionEl2);
+          setTimeout(function () {
+            if (explosionEl2) { explosionEl2.remove(); explosionEl2 = null; }
+          }, EXPLOSION_DISPLAY_MS);
+        }
+      }
+
+      function triggerExplosion(isPlayer1) {
+        const p = isPlayer1 ? player : player2;
+        const ex = p.x + PLAYER_WIDTH / 2;
+        const ey = p.y + getPlayerHeight(isPlayer1) / 2;
+        applyDamage(isPlayer1, 1);
+        showExplosionAt(isPlayer1, ex, ey);
+      }
+
+      function triggerBallHit(isPlayer1, hitX, hitY, opts) {
+        const damage = opts && opts.damage != null ? opts.damage : 1;
+        const useExplosion = !!(opts && opts.useExplosion);
+        playSound('sound/hit2.wav');
+        if (useExplosion) {
+          if (impactEl) { impactEl.remove(); impactEl = null; }
+          showExplosionAt(isPlayer1, hitX, hitY);
+        } else {
+          if (impactEl) impactEl.remove();
+          impactEl = makeImpactEl(hitX, hitY);
+          gameContainer.appendChild(impactEl);
+          setTimeout(function () {
+            if (impactEl) { impactEl.remove(); impactEl = null; }
+          }, IMPACT_DISPLAY_MS);
+        }
+        // Both players can't throw for a set period (balls will blink)
+        throwBlockedUntilBoth = Date.now() + THROW_BLOCK_AFTER_HIT_MS;
+        applyDamage(isPlayer1, damage);
+      }
+
+      function makeExplosionEl(cx, cy) {
+        const w = explosionImg.complete ? explosionImg.naturalWidth : 64;
+        const h = explosionImg.complete ? explosionImg.naturalHeight : 64;
+        const el = document.createElement('img');
+        el.className = 'explosion-overlay';
+        el.src = 'images/explosion.gif';
+        el.style.width = w + 'px';
+        el.style.height = h + 'px';
+        el.style.left = (cx - w / 2) + 'px';
+        el.style.top = (cy - h / 2) + 'px';
+        return el;
+      }
+
+      /** Mid-air explode (e.g. explode ball hits an opposing snowball). */
+      function showDetachedExplosion(cx, cy) {
+        const el = makeExplosionEl(cx, cy);
+        gameContainer.appendChild(el);
+        setTimeout(function () {
+          el.remove();
+        }, EXPLOSION_DISPLAY_MS);
+      }
+
+      function makeImpactEl(cx, cy) {
+        const w = impactImg.complete ? impactImg.naturalWidth : 32;
+        const h = impactImg.complete ? impactImg.naturalHeight : 32;
+        const el = document.createElement('img');
+        el.className = 'impact-overlay';
+        el.src = 'images/impact.gif';
+        el.style.width = w + 'px';
+        el.style.height = h + 'px';
+        el.style.left = (cx - w / 2) + 'px';
+        el.style.top = (cy - h / 2) + 'px';
+        return el;
+      }
+
+      function randomCoinPos(platformLeft) {
+        // Y: must be reachable by jumping but not by standing
+        // Coin top cannot be above the apex of the player's head
+        const yMin = PLATFORM_TOP - PLAYER_HEIGHT - JUMP_APEX;
+        // Coin bottom must be above the player's head when standing (forces a jump)
+        const yMax = PLATFORM_TOP - PLAYER_HEIGHT - COIN_SIZE - 5;
+        const x = platformLeft + Math.random() * (PLATFORM_WIDTH - COIN_SIZE);
+        const y = yMin + Math.random() * (yMax - yMin);
+        return { x, y };
+      }
+
+      function showCoin(coin, platformLeft) {
+        const pos = randomCoinPos(platformLeft);
+        coin.x = pos.x;
+        coin.y = pos.y;
+        coin.active = true;
+        if (coin.el) coin.el.remove();
+        const el = document.createElement('img');
+        el.className = 'coin-overlay';
+        el.src = coinImg.src || 'images/coin.gif';
+        el.style.position = 'absolute';
+        el.style.width = COIN_SIZE + 'px';
+        el.style.height = COIN_SIZE + 'px';
+        el.style.left = coin.x + 'px';
+        el.style.top = coin.y + 'px';
+        el.style.pointerEvents = 'none';
+        coin.el = el;
+        gameContainer.appendChild(el);
+      }
+
+      function hideCoin(coin) {
+        coin.active = false;
+        if (coin.el) { coin.el.remove(); coin.el = null; }
+      }
+
+      function coinOverlapsPlayer(coin, isPlayer1) {
+        const p = isPlayer1 ? player : player2;
+        const h = getPlayerHeight(isPlayer1);
+        return (
+          coin.x < p.x + PLAYER_WIDTH &&
+          coin.x + COIN_SIZE > p.x &&
+          coin.y < p.y + h &&
+          coin.y + COIN_SIZE > p.y
+        );
+      }
+
+      function updateCoins() {
+        const now = Date.now();
+
+        // Coin above player 1's platform (no new spawns while special meter is full)
+        if (!coin1.active) {
+          if (special1 < MAX_SPECIAL && now >= coin1.nextShowAt) {
+            showCoin(coin1, PLATFORM_GAP_LEFT);
+            coin1.showUntil = now + COIN_DURATION_MS;
+          }
+        } else {
+          if (respawnAt === null && coinOverlapsPlayer(coin1, true)) {
+            playSound('sound/coin2.wav');
+            if (special1 < MAX_SPECIAL) {
+              if (quickSpecialEnabled) special1 = MAX_SPECIAL;
+              else special1++;
+              if (special1 === MAX_SPECIAL) {
+                playSound('sound/special2.wav');
+                startSpecialSlot(true);
+              }
+            }
+            hideCoin(coin1);
+            coin1.nextShowAt = now + COIN_INTERVAL_MS;
+          } else if (now >= coin1.showUntil) {
+            hideCoin(coin1);
+            coin1.nextShowAt = now + COIN_INTERVAL_MS;
+          }
+        }
+
+        // Coin above player 2's platform (no new spawns while special meter is full)
+        if (!coin2.active) {
+          if (special2 < MAX_SPECIAL && now >= coin2.nextShowAt) {
+            showCoin(coin2, RIGHT_PLATFORM_LEFT);
+            coin2.showUntil = now + COIN_DURATION_MS;
+          }
+        } else {
+          if (respawnAt2 === null && coinOverlapsPlayer(coin2, false)) {
+            playSound('sound/coin.wav');
+            if (special2 < MAX_SPECIAL) {
+              if (quickSpecialEnabled) special2 = MAX_SPECIAL;
+              else special2++;
+              if (special2 === MAX_SPECIAL) {
+                playSound('sound/special2.wav');
+                startSpecialSlot(false);
+              }
+            }
+            hideCoin(coin2);
+            coin2.nextShowAt = now + COIN_INTERVAL_MS;
+          } else if (now >= coin2.showUntil) {
+            hideCoin(coin2);
+            coin2.nextShowAt = now + COIN_INTERVAL_MS;
+          }
+        }
+      }
+
+      function update(dt) {
+        if (gameOver) {
+          if (Date.now() >= gameOver.until) {
+            returnToStartScreen();
+          }
+          return;
+        }
+
+        // Countdown before match start (or after win): freeze play (no move/jump/throw); always play count + begin sounds
+        if (countdownUntil !== null) {
+          if (Date.now() >= countdownUntil) {
+            if (lastCountdownStep !== 0) playSound('sound/begin2.wav'); // ensure begin plays even if step 0 was skipped
+            countdownUntil = null;
+            ballAvailableAt = Date.now();
+            ballAvailableAt2 = Date.now();
+            coin1.nextShowAt = Date.now() + COIN_INTERVAL_MS;
+            coin2.nextShowAt = Date.now() + COIN_INTERVAL_MS;
+          } else {
+            const remaining = countdownUntil - Date.now();
+            const step = remaining > 3000 ? 3 : remaining > 2000 ? 2 : remaining > 1000 ? 1 : 0;
+            if (step !== lastCountdownStep) {
+              lastCountdownStep = step;
+              if (step === 0) playSound('sound/begin2.wav');
+              else playSound('sound/count2.wav');
+            }
+            // No movement or throwing during countdown
+            return;
+          }
+        }
+
+        updateCoins();
+        updateHealthPowerups(Date.now());
+        updateShrinkPowerups(Date.now());
+
+        // Move all balls
+        for (const b of thrownBalls) {
+          b.x += b.speed * dt;
+        }
+
+        // Ball-vs-ball: growball overpowers non-growballs; growball↔growball cancel;
+        // explode detonates on contact with an opposing ball; otherwise both cancel.
+        const ballCollisionRemove = new Set();
+        let ballCollisionImpact = null;
+        let ballCollisionExploded = false;
+        let ballCollisionGrowballClash = false;
+        for (let i = 0; i < thrownBalls.length; i++) {
+          if (ballCollisionRemove.has(i)) continue;
+          const a = thrownBalls[i];
+          for (let j = i + 1; j < thrownBalls.length; j++) {
+            if (ballCollisionRemove.has(j)) continue;
+            const b = thrownBalls[j];
+            if (a.owner === b.owner || !ballsOverlap(a, b)) continue;
+
+            const mid = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+            const aGrow = !!a.isGrowball;
+            const bGrow = !!b.isGrowball;
+
+            if (aGrow && bGrow) {
+              ballCollisionRemove.add(i);
+              ballCollisionRemove.add(j);
+              ballCollisionGrowballClash = true;
+              if (!ballCollisionImpact) ballCollisionImpact = mid;
+            } else if (aGrow || bGrow) {
+              // Growball continues; opposing ball is destroyed
+              const other = aGrow ? b : a;
+              ballCollisionRemove.add(aGrow ? j : i);
+              if (other.isExplode) {
+                ballCollisionExploded = true;
+                showDetachedExplosion(mid.x, mid.y);
+                applyExplodeBlast(mid.x, mid.y, other.owner);
+              } else if (!ballCollisionImpact) {
+                ballCollisionImpact = mid;
+              }
+            } else {
+              ballCollisionRemove.add(i);
+              ballCollisionRemove.add(j);
+              if (a.isExplode || b.isExplode) {
+                ballCollisionExploded = true;
+                showDetachedExplosion(mid.x, mid.y);
+                if (a.isExplode) applyExplodeBlast(mid.x, mid.y, a.owner);
+                if (b.isExplode) applyExplodeBlast(mid.x, mid.y, b.owner);
+              } else if (!ballCollisionImpact) {
+                ballCollisionImpact = mid;
+              }
+            }
+            break;
+          }
+        }
+        const sortedRemove = Array.from(ballCollisionRemove).sort((p, q) => q - p);
+        for (const idx of sortedRemove) {
+          thrownBalls.splice(idx, 1);
+        }
+        if (ballCollisionGrowballClash) {
+          playSound('sound/boulder2.wav');
+        } else if (ballCollisionExploded) {
+          playSound('sound/hit2.wav');
+        }
+        if (ballCollisionImpact) {
+          if (!ballCollisionGrowballClash && !ballCollisionExploded) {
+            playSound('sound/hit-ball2.wav');
+          }
+          if (impactEl) impactEl.remove();
+          impactEl = makeImpactEl(ballCollisionImpact.x, ballCollisionImpact.y);
+          gameContainer.appendChild(impactEl);
+          setTimeout(function () {
+            if (impactEl) { impactEl.remove(); impactEl = null; }
+          }, IMPACT_DISPLAY_MS);
+        }
+
+        // Bounce / remove off-screen; check player hits
+        for (let i = thrownBalls.length - 1; i >= 0; i--) {
+          const b = thrownBalls[i];
+          const r = getBallRadius(b);
+          if (b.isBounce) {
+            // Bounce off both side walls until it hits someone.
+            if (b.speed > 0 && b.x + r >= CANVAS_WIDTH) {
+              b.x = CANVAS_WIDTH - r;
+              b.speed = -Math.abs(b.speed);
+              playSound('sound/bounce2.wav');
+            } else if (b.speed < 0 && b.x - r <= 0) {
+              b.x = r;
+              b.speed = Math.abs(b.speed);
+              playSound('sound/bounce2.wav');
+            }
+          } else if (b.x - r > CANVAS_WIDTH || b.x + r < 0) {
+            thrownBalls.splice(i, 1);
+            continue;
+          }
+          if (b.lobby) continue;
+          if (respawnAt === null && ballHitPlayer(b, true)) {
+            triggerBallHit(true, b.x, b.y, {
+              damage: b.isExplode ? EXPLODE_DAMAGE : 1,
+              useExplosion: !!b.isExplode
+            });
+            if (b.isGrowball) playSound('sound/boulder2.wav');
+            thrownBalls.splice(i, 1);
+          } else if (respawnAt2 === null && ballHitPlayer(b, false)) {
+            triggerBallHit(false, b.x, b.y, {
+              damage: b.isExplode ? EXPLODE_DAMAGE : 1,
+              useExplosion: !!b.isExplode
+            });
+            if (b.isGrowball) playSound('sound/boulder2.wav');
+            thrownBalls.splice(i, 1);
+          }
+        }
+
+        // Player 1 respawn delay
+        if (respawnAt !== null) {
+          if (Date.now() >= respawnAt) {
+            if (explosionEl) { explosionEl.remove(); explosionEl = null; }
+            respawnOnPlatform();
+            respawnAt = null;
+          } else {
+            updatePlayer2Only(dt);
+            return;
+          }
+        }
+
+        // Player 2 respawn delay
+        if (respawnAt2 !== null) {
+          if (Date.now() >= respawnAt2) {
+            if (explosionEl2) { explosionEl2.remove(); explosionEl2 = null; }
+            respawnOnPlatform2();
+            respawnAt2 = null;
+          } else {
+            updatePlayer1Only(dt);
+            return;
+          }
+        }
+
+        if (isInLava()) {
+          playSound('sound/fire2.wav');
+          triggerExplosion(true);
+          updatePlayer2Only(dt);
+          return;
+        }
+
+        if (isInLava2()) {
+          playSound('sound/fire2.wav');
+          triggerExplosion(false);
+          updatePlayer1Only(dt);
+          return;
+        }
+
+        updatePlayer1Only(dt);
+        updatePlayer2Only(dt);
+      }
+
+      function updatePlayer1Only(dt) {
+        const h = getPlayerHeight(true);
+        if (keys['a']) player.x -= MOVE_SPEED * dt;
+        if (keys['d']) player.x += MOVE_SPEED * dt;
+        clampPlayerX();
+        if (countdownUntil === null && keys['w'] && isOnPlatform()) {
+          player.velY = JUMP_VELOCITY;
+          playSound('sound/jump.wav');
+        }
+        const feetYBefore = player.y + h;
+        player.velY += GRAVITY * dt;
+        player.y += player.velY * dt;
+        const feetY = player.y + h;
+        const landedFromAbove =
+          player.velY >= 0 &&
+          platformOverlapX() &&
+          feetY >= PLATFORM_TOP &&
+          feetYBefore < PLATFORM_TOP;
+        if (landedFromAbove) {
+          player.y = PLATFORM_TOP - h;
+          player.velY = 0;
+        } else if (
+          platformOverlapX() &&
+          feetY > PLATFORM_TOP &&
+          feetY <= PLATFORM_TOP + 4 &&
+          feetYBefore >= PLATFORM_TOP - 1 &&
+          feetYBefore <= PLATFORM_TOP + 4
+        ) {
+          player.y = PLATFORM_TOP - h;
+          player.velY = 0;
+        }
+      }
+
+      function updatePlayer2Only(dt) {
+        const h = getPlayerHeight(false);
+        if (keys['j']) player2.x -= MOVE_SPEED * dt;
+        if (keys['l']) player2.x += MOVE_SPEED * dt;
+        clampPlayerX2();
+        if (countdownUntil === null && keys['i'] && isOnPlatform2()) {
+          player2.velY = JUMP_VELOCITY;
+          playSound('sound/jump.wav');
+        }
+        const feetYBefore = player2.y + h;
+        player2.velY += GRAVITY * dt;
+        player2.y += player2.velY * dt;
+        const feetY = player2.y + h;
+        const landedFromAbove =
+          player2.velY >= 0 &&
+          platformOverlapX2() &&
+          feetY >= PLATFORM_TOP &&
+          feetYBefore < PLATFORM_TOP;
+        if (landedFromAbove) {
+          player2.y = PLATFORM_TOP - h;
+          player2.velY = 0;
+        } else if (
+          platformOverlapX2() &&
+          feetY > PLATFORM_TOP &&
+          feetY <= PLATFORM_TOP + 4 &&
+          feetYBefore >= PLATFORM_TOP - 1 &&
+          feetYBefore <= PLATFORM_TOP + 4
+        ) {
+          player2.y = PLATFORM_TOP - h;
+          player2.velY = 0;
+        }
+      }
+
+      const START_KEY_SIZE = 54;
+      const START_KEY_GAP = 8;
+      /** Layout anchor for former SNOW / THROW! title (logo baseline uses THROW! line). */
+      const START_TITLE_SIZE = 72;
+      const START_TITLE_LINE_HEIGHT = START_TITLE_SIZE * 0.9;
+      /** Former two-line title block height (SNOW + THROW!); logos are 1.5× this. */
+      const START_TITLE_BLOCK_HEIGHT = START_TITLE_LINE_HEIGHT + START_TITLE_SIZE;
+      const START_LOGO_HEIGHT = START_TITLE_BLOCK_HEIGHT * 2;
+      /** Native logo assets are 2000×1000 (2:1). */
+      const START_LOGO_ASPECT = 2;
+      const START_LOGO_WIDTH = START_LOGO_HEIGHT * START_LOGO_ASPECT;
+      const START_LOGO_COUNT = 14;
+      const START_LOGO_FADE_MS = 100;
+      const START_LOGO_HOLD_MS = 2000;
+      const START_LOGO_CYCLE_MS =
+        START_LOGO_FADE_MS + START_LOGO_HOLD_MS + START_LOGO_FADE_MS;
+      /** Rotation keyframes: in -15→-5, hold -5→5, out 5→15. */
+      const START_LOGO_ROT_IN = -15;
+      const START_LOGO_ROT_HOLD_START = -5;
+      const START_LOGO_ROT_HOLD_END = 5;
+      const START_LOGO_ROT_OUT = 15;
+      const START_PROMPT_SIZE = 22;
+      const START_NAME_SIZE = 26;
+      const START_HAT_LABEL_SIZE = 22;
+
+      /** Subtle title-screen snow flurries (not used in-match). */
+      const START_SNOW_COUNT = 96;
+      const startSnow = [];
+      for (let i = 0; i < START_SNOW_COUNT; i++) {
+        startSnow.push({
+          x: Math.random() * CANVAS_WIDTH,
+          y: Math.random() * CANVAS_HEIGHT,
+          r: 0.8 + Math.random() * 1.6,
+          speed: 0.35 + Math.random() * 0.55,
+          drift: (Math.random() - 0.5) * 0.35,
+          wobble: Math.random() * Math.PI * 2,
+          wobbleSpeed: 0.02 + Math.random() * 0.04
+        });
+      }
+
+      function resetStartSnowflake(flake, fromTop) {
+        flake.x = Math.random() * CANVAS_WIDTH;
+        flake.y = fromTop ? -4 - Math.random() * 40 : Math.random() * CANVAS_HEIGHT;
+        flake.r = 0.8 + Math.random() * 1.6;
+        flake.speed = 0.35 + Math.random() * 0.55;
+        flake.drift = (Math.random() - 0.5) * 0.35;
+        flake.wobble = Math.random() * Math.PI * 2;
+        flake.wobbleSpeed = 0.02 + Math.random() * 0.04;
+      }
+
+      function updateStartSnow(dt) {
+        for (let i = 0; i < startSnow.length; i++) {
+          const f = startSnow[i];
+          f.wobble += f.wobbleSpeed * dt;
+          f.y += f.speed * dt;
+          f.x += (f.drift + Math.sin(f.wobble) * 0.4) * dt;
+          if (f.y > CANVAS_HEIGHT + 4 || f.x < -8 || f.x > CANVAS_WIDTH + 8) {
+            resetStartSnowflake(f, true);
+          }
+        }
+      }
+
+      function drawStartSnow() {
+        ctx.fillStyle = '#fff';
+        for (let i = 0; i < startSnow.length; i++) {
+          const f = startSnow[i];
+          ctx.beginPath();
+          ctx.arc(f.x, f.y, f.r, 0, Math.PI * 2);
+          ctx.fill();
+        }
+      }
+
+      const startLogoImgs = [];
+      for (let i = 1; i <= START_LOGO_COUNT; i++) {
+        const img = new Image();
+        const n = i < 10 ? '0' + i : String(i);
+        img.src = 'images/logo-' + n + '.png';
+        startLogoImgs.push(img);
+      }
+
+      /**
+       * Per-logo timeline:
+       * in 100ms (opacity 0→1, -15°→-5°) → hold 2000ms (-5°→5°) → out 100ms (1→0, 5°→15°).
+       */
+      function getStartLogoAnim() {
+        const elapsed = Date.now() % (START_LOGO_CYCLE_MS * START_LOGO_COUNT);
+        const index = Math.floor(elapsed / START_LOGO_CYCLE_MS) % START_LOGO_COUNT;
+        const t = elapsed % START_LOGO_CYCLE_MS;
+        let opacity = 1;
+        let rotateDeg = 0;
+        if (t < START_LOGO_FADE_MS) {
+          const p = t / START_LOGO_FADE_MS;
+          opacity = p;
+          rotateDeg =
+            START_LOGO_ROT_IN + (START_LOGO_ROT_HOLD_START - START_LOGO_ROT_IN) * p;
+        } else if (t < START_LOGO_FADE_MS + START_LOGO_HOLD_MS) {
+          const p = (t - START_LOGO_FADE_MS) / START_LOGO_HOLD_MS;
+          opacity = 1;
+          rotateDeg =
+            START_LOGO_ROT_HOLD_START +
+            (START_LOGO_ROT_HOLD_END - START_LOGO_ROT_HOLD_START) * p;
+        } else {
+          const p = (t - START_LOGO_FADE_MS - START_LOGO_HOLD_MS) / START_LOGO_FADE_MS;
+          opacity = 1 - p;
+          rotateDeg =
+            START_LOGO_ROT_HOLD_END + (START_LOGO_ROT_OUT - START_LOGO_ROT_HOLD_END) * p;
+        }
+        return { index: index, opacity: opacity, rotateDeg: rotateDeg };
+      }
+
+      /** Logo rect: bottom edge on THROW! baseline, extends upward (2:1 assets). */
+      function getStartLogoRect(layout) {
+        const w = START_LOGO_WIDTH;
+        const h = START_LOGO_HEIGHT;
+        const bottom = layout.title2Y + START_TITLE_SIZE * 0.5;
+        return {
+          x: (CANVAS_WIDTH - w) / 2,
+          y: bottom - h,
+          w: w,
+          h: h
+        };
+      }
+
+      function drawStartLogo(layout) {
+        const anim = getStartLogoAnim();
+        const logoImg = startLogoImgs[anim.index];
+        if (!logoImg || !logoImg.complete || logoImg.naturalWidth <= 0) return;
+        if (anim.opacity <= 0) return;
+        const rect = getStartLogoRect(layout);
+        const cx = rect.x + rect.w / 2;
+        const cy = rect.y + rect.h / 2;
+        ctx.save();
+        ctx.globalAlpha = anim.opacity;
+        ctx.translate(cx, cy);
+        ctx.rotate((anim.rotateDeg * Math.PI) / 180);
+        ctx.drawImage(logoImg, -rect.w / 2, -rect.h / 2, rect.w, rect.h);
+        ctx.restore();
+      }
+
+      /**
+       * Start-screen vertical layout:
+       * - Player columns stay put (floor fixed for jump clearance)
+       * - Title logos sit on the THROW! baseline; group lowered ~60% into the air gap
+       */
+      function getStartScreenLayout() {
+        const titleHalf = START_TITLE_SIZE * .5;
+        const titleLineHeight = START_TITLE_LINE_HEIGHT;
+        const promptGapFromTitle = 28;
+        const prompt2FromPrompt1 = 28;
+        const prompt2Half = START_PROMPT_SIZE * -8;
+        const nameFromFloor = 28;
+        const keysFromName = 28;
+        const keysHeight = START_KEY_SIZE * 2 + START_KEY_GAP;
+        const hatFromKeysBottom = 36;
+        const hatHalf = START_HAT_LABEL_SIZE * 0.5;
+
+        const belowFloor =
+          nameFromFloor + keysFromName + keysHeight + hatFromKeysBottom + hatHalf;
+
+        // Full jump apex with hat flush to the top of the black frame
+        const floorY = PLAYER_HEIGHT + JUMP_APEX + HAT_SIZE;
+        const hatBottom = floorY + belowFloor;
+        const pad = Math.max(0, CANVAS_HEIGHT - hatBottom);
+
+        // Natural title-group position, then drop further into the air gap
+        const title1Y0 = pad + titleHalf;
+        const title2Y0 = title1Y0 + titleLineHeight;
+        const titleBlockBottom0 = title2Y0 + titleHalf;
+        const prompt1Y0 = titleBlockBottom0 + promptGapFromTitle;
+        const prompt2Y0 = prompt1Y0 + prompt2FromPrompt1;
+        const promptBlockBottom = prompt2Y0 + prompt2Half;
+        const playerTop = floorY - PLAYER_HEIGHT;
+        const titleDrop = Math.max(0, (playerTop - promptBlockBottom) * 0.6);
+
+        const title1Y = title1Y0 + titleDrop;
+        const title2Y = title2Y0 + titleDrop;
+        const prompt1Y = prompt1Y0 + titleDrop;
+        const prompt2Y = prompt2Y0 + titleDrop;
+        const nameY = floorY + nameFromFloor;
+        const keysTop = nameY + keysFromName;
+        const hatY = keysTop + keysHeight + hatFromKeysBottom;
+
+        return { pad, title1Y, title2Y, prompt1Y, prompt2Y, floorY, nameY, keysTop, hatY };
+      }
+
+      let startFloorY = getStartScreenLayout().floorY;
+
+      function placePlayersOnStartFloor() {
+        startFloorY = getStartScreenLayout().floorY;
+        player.x = PLATFORM_GAP_LEFT + PLATFORM_WIDTH / 2 - PLAYER_WIDTH / 2;
+        player.y = startFloorY - PLAYER_HEIGHT;
+        player.velY = 0;
+        player2.x = RIGHT_PLATFORM_LEFT + PLATFORM_WIDTH / 2 - PLAYER_WIDTH / 2;
+        player2.y = startFloorY - PLAYER_HEIGHT;
+        player2.velY = 0;
+      }
+
+      function isOnStartFloor(p, h) {
+        const feetY = p.y + h;
+        return feetY >= startFloorY - 1 && feetY <= startFloorY + 4;
+      }
+
+      function showImpactAt(cx, cy) {
+        playSound('sound/hit-ball2.wav');
+        if (impactEl) impactEl.remove();
+        impactEl = makeImpactEl(cx, cy);
+        gameContainer.appendChild(impactEl);
+        setTimeout(function () {
+          if (impactEl) {
+            impactEl.remove();
+            impactEl = null;
+          }
+        }, IMPACT_DISPLAY_MS);
+      }
+
+      function circleHitsRect(cx, cy, r, rect) {
+        const nearestX = Math.max(rect.x, Math.min(cx, rect.x + rect.w));
+        const nearestY = Math.max(rect.y, Math.min(cy, rect.y + rect.h));
+        const dx = cx - nearestX;
+        const dy = cy - nearestY;
+        return dx * dx + dy * dy <= r * r;
+      }
+
+      /** Axis-aligned hitboxes for the logo + prompt lines. */
+      function getStartTitleHitboxes(layout) {
+        const cx = CANVAS_WIDTH / 2;
+        const padX = 8;
+        const padY = 4;
+        const logo = getStartLogoRect(layout);
+        const boxes = [{ x: logo.x, y: logo.y, w: logo.w, h: logo.h }];
+        const lines = [
+          {
+            text: 'Players ready?',
+            y: layout.prompt1Y,
+            font: 'bold ' + START_PROMPT_SIZE + 'px monospace',
+            size: START_PROMPT_SIZE
+          },
+          {
+            text: 'Throw to start!',
+            y: layout.prompt2Y,
+            font: 'bold ' + START_PROMPT_SIZE + 'px monospace',
+            size: START_PROMPT_SIZE
+          }
+        ];
+        for (let i = 0; i < lines.length; i++) {
+          const line = lines[i];
+          ctx.font = line.font;
+          const w = ctx.measureText(line.text).width + padX * 2;
+          const h = line.size + padY * 2;
+          boxes.push({
+            x: cx - w / 2,
+            y: line.y - h / 2,
+            w: w,
+            h: h
+          });
+        }
+        return boxes;
+      }
+
+      /** Jump + gravity on the start screen (no left/right — those cycle hats). */
+      function updateStartScreen(dt) {
+        updateStartSnow(dt);
+        function step(p, jumpKey) {
+          const h = PLAYER_HEIGHT;
+          const onFloor = isOnStartFloor(p, h);
+          if (keys[jumpKey] && onFloor) {
+            p.velY = JUMP_VELOCITY;
+            playSound('sound/jump.wav');
+          }
+          const feetYBefore = p.y + h;
+          p.velY += GRAVITY * dt;
+          p.y += p.velY * dt;
+          const feetY = p.y + h;
+          if (p.velY >= 0 && feetY >= startFloorY && feetYBefore < startFloorY) {
+            p.y = startFloorY - h;
+            p.velY = 0;
+          } else if (
+            feetY > startFloorY &&
+            feetY <= startFloorY + 4 &&
+            feetYBefore >= startFloorY - 1 &&
+            feetYBefore <= startFloorY + 4
+          ) {
+            p.y = startFloorY - h;
+            p.velY = 0;
+          }
+          // Safety: hat is drawn above the token
+          if (p.y < HAT_SIZE) {
+            p.y = HAT_SIZE;
+            if (p.velY < 0) p.velY = 0;
+          }
+        }
+        step(player, 'w');
+        step(player2, 'i');
+
+        // Lobby throws: hit title/prompt (impact gif), otherwise fly off-frame
+        const hitboxes = getStartTitleHitboxes(getStartScreenLayout());
+        for (let i = thrownBalls.length - 1; i >= 0; i--) {
+          const b = thrownBalls[i];
+          b.x += b.speed * dt;
+          const r = getBallRadius(b);
+          let hit = false;
+          for (let j = 0; j < hitboxes.length; j++) {
+            if (circleHitsRect(b.x, b.y, r, hitboxes[j])) {
+              showImpactAt(b.x, b.y);
+              thrownBalls.splice(i, 1);
+              hit = true;
+              break;
+            }
+          }
+          if (hit) continue;
+          if (b.x - r > CANVAS_WIDTH || b.x + r < 0) {
+            thrownBalls.splice(i, 1);
+          }
+        }
+
+        if (startGameAt !== null && Date.now() >= startGameAt) {
+          startGameAt = null;
+          startGame();
+        }
+      }
+
+      /** Outlined keyboard key: letter on top, action below. */
+      function drawControlKey(cx, cy, size, letter, action, highlight) {
+        const x = cx - size / 2;
+        const y = cy - size / 2;
+        if (highlight) {
+          ctx.fillStyle = 'rgba(255,255,255,0.12)';
+          ctx.fillRect(x, y, size, size);
+        }
+        ctx.strokeStyle = '#fff';
+        ctx.lineWidth = 2;
+        ctx.strokeRect(x + 0.5, y + 0.5, size - 1, size - 1);
+        ctx.fillStyle = '#fff';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.font = 'bold 18px monospace';
+        ctx.fillText(letter, cx, cy - 8);
+        ctx.font = '12px monospace';
+        ctx.fillText(action, cx, cy + 12);
+      }
+
+      /** Inverted-T key cluster (jump above left / throw / right). */
+      function drawControlCluster(centerX, topY, keysSpec, throwReady) {
+        const s = START_KEY_SIZE;
+        const g = START_KEY_GAP;
+        const row2Y = topY + s + g;
+        drawControlKey(centerX, topY + s / 2, s, keysSpec.jump, 'Jump', false);
+        drawControlKey(centerX - s - g, row2Y + s / 2, s, keysSpec.left, 'Left', false);
+        drawControlKey(centerX, row2Y + s / 2, s, keysSpec.throw, 'Throw', throwReady);
+        drawControlKey(centerX + s + g, row2Y + s / 2, s, keysSpec.right, 'Right', false);
+        return row2Y + s;
+      }
+
+      /** Hat selection label: < label > */
+      function drawStartHatLabel(tokenCenterX, y, hatIndex, options) {
+        const label = hatIndex < 0 ? 'hat?' : options[hatIndex];
+        ctx.fillStyle = '#fff';
+        ctx.font = 'bold 22px monospace';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText('<  ' + label + '  >', tokenCenterX, y);
+      }
+
+      function draw() {
+        if (!gameStarted) {
+          setLavaOverlayVisible(false);
+          ctx.fillStyle = '#000';
+          ctx.fillRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
+
+          const layout = getStartScreenLayout();
+          startFloorY = layout.floorY;
+
+          // Logo cycle (in / hold / out) + prompt — logo base on THROW! baseline
+          drawStartLogo(layout);
+          ctx.fillStyle = '#fff';
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'middle';
+          ctx.font = 'bold ' + START_PROMPT_SIZE + 'px monospace';
+          ctx.fillText('Players ready?', CANVAS_WIDTH / 2, layout.prompt1Y);
+          ctx.fillText('Throw to start!', CANVAS_WIDTH / 2, layout.prompt2Y);
+
+          const leftX = player.x + PLAYER_WIDTH / 2;
+          const rightX = player2.x + PLAYER_WIDTH / 2;
+
+          // Tokens (jumpable) → names → key outlines → hat
+          ctx.fillStyle = '#f00';
+          ctx.fillRect(player.x, player.y, PLAYER_WIDTH, PLAYER_HEIGHT);
+          drawPlayerHat(player.x, player.y, PLAYER_WIDTH, rojoHatIndex, rojoHatImgs);
+
+          ctx.fillStyle = '#00f';
+          ctx.fillRect(player2.x, player2.y, PLAYER_WIDTH, PLAYER_HEIGHT);
+          drawPlayerHat(player2.x, player2.y, PLAYER_WIDTH, azulHatIndex, azulHatImgs);
+
+          // Held balls until that player throws to ready
+          if (!rojoReady) {
+            const held = getHeldBallCenter();
+            ctx.fillStyle = '#fff';
+            ctx.beginPath();
+            ctx.arc(held.x, held.y, BALL_RADIUS, 0, Math.PI * 2);
+            ctx.fill();
+          }
+          if (!azulReady) {
+            const held = getHeldBallCenter2();
+            ctx.fillStyle = '#fff';
+            ctx.beginPath();
+            ctx.arc(held.x, held.y, BALL_RADIUS, 0, Math.PI * 2);
+            ctx.fill();
+          }
+          for (const b of thrownBalls) {
+            ctx.fillStyle = '#fff';
+            ctx.beginPath();
+            ctx.arc(b.x, b.y, getBallRadius(b), 0, Math.PI * 2);
+            ctx.fill();
+          }
+
+          ctx.fillStyle = '#fff';
+          ctx.font = 'bold ' + START_NAME_SIZE + 'px monospace';
+          ctx.fillText(rojoReady ? 'ROJO READY!' : 'ROJO', leftX, layout.nameY);
+          ctx.fillText(azulReady ? 'AZUL READY!' : 'AZUL', rightX, layout.nameY);
+
+          drawControlCluster(
+            leftX,
+            layout.keysTop,
+            { jump: 'W', left: 'A', throw: 'S', right: 'D' },
+            rojoReady
+          );
+          drawControlCluster(
+            rightX,
+            layout.keysTop,
+            { jump: 'I', left: 'J', throw: 'K', right: 'L' },
+            azulReady
+          );
+
+          drawStartHatLabel(leftX, layout.hatY, rojoHatIndex, ROJO_HAT_OPTIONS);
+          drawStartHatLabel(rightX, layout.hatY, azulHatIndex, AZUL_HAT_OPTIONS);
+          drawStartSnow();
+          return;
+        }
+        ctx.fillStyle = '#000';
+        ctx.fillRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
+
+        ctx.fillStyle = '#444';
+        ctx.fillRect(
+          PLATFORM_GAP_LEFT,
+          PLATFORM_TOP,
+          PLATFORM_WIDTH,
+          PLATFORM_THICKNESS
+        );
+        ctx.fillRect(
+          RIGHT_PLATFORM_LEFT,
+          PLATFORM_TOP,
+          PLATFORM_WIDTH,
+          PLATFORM_THICKNESS
+        );
+
+        for (const b of thrownBalls) {
+          ctx.fillStyle = b.isExplode
+            ? EXPLODE_BALL_COLOR
+            : b.isBounce
+              ? BOUNCE_BALL_COLOR
+              : b.isGrowball
+                ? GROWBALL_BALL_COLOR
+                : b.isShrink
+                  ? SHRINK_BALL_COLOR
+                  : '#fff';
+          ctx.beginPath();
+          ctx.arc(b.x, b.y, getBallRadius(b), 0, Math.PI * 2);
+          ctx.fill();
+        }
+
+        if (respawnAt === null && hp1 > 0) {
+          ctx.fillStyle = '#f00';
+          ctx.fillRect(player.x, player.y, PLAYER_WIDTH, getPlayerHeight(true));
+          drawPlayerHat(player.x, player.y, PLAYER_WIDTH, rojoHatIndex, rojoHatImgs);
+        }
+        if (respawnAt2 === null && hp2 > 0) {
+          ctx.fillStyle = '#00f';
+          ctx.fillRect(player2.x, player2.y, PLAYER_WIDTH, getPlayerHeight(false));
+          drawPlayerHat(player2.x, player2.y, PLAYER_WIDTH, azulHatIndex, azulHatImgs);
+        }
+
+        // Held balls: solid when can throw, blinking when both are blocked after a hit
+        const bothBlocked = Date.now() < throwBlockedUntilBoth;
+        const blinkOn = Math.floor(Date.now() / 200) % 2 === 0;
+        if (respawnAt === null && Date.now() >= ballAvailableAt) {
+          const held = getHeldBallCenter();
+          if (!bothBlocked || blinkOn) {
+            const grow1 = hasGrowball(true);
+            ctx.fillStyle = hasExplode(true)
+              ? EXPLODE_BALL_COLOR
+              : hasBounce(true)
+                ? BOUNCE_BALL_COLOR
+                : grow1
+                  ? GROWBALL_BALL_COLOR
+                  : isShrunk(true)
+                    ? SHRINK_BALL_COLOR
+                    : '#fff';
+            ctx.beginPath();
+            ctx.arc(held.x, held.y, grow1 ? GROWBALL_RADIUS : BALL_RADIUS, 0, Math.PI * 2);
+            ctx.fill();
+          }
+        }
+        if (respawnAt2 === null && Date.now() >= ballAvailableAt2) {
+          const held = getHeldBallCenter2();
+          if (!bothBlocked || blinkOn) {
+            const grow2 = hasGrowball(false);
+            ctx.fillStyle = hasExplode(false)
+              ? EXPLODE_BALL_COLOR
+              : hasBounce(false)
+                ? BOUNCE_BALL_COLOR
+                : grow2
+                  ? GROWBALL_BALL_COLOR
+                  : isShrunk(false)
+                    ? SHRINK_BALL_COLOR
+                    : '#fff';
+            ctx.beginPath();
+            ctx.arc(held.x, held.y, grow2 ? GROWBALL_RADIUS : BALL_RADIUS, 0, Math.PI * 2);
+            ctx.fill();
+          }
+        }
+
+        const HP_PAD = 20;
+        const HP_BOX = 14;
+        const HP_GAP = 6;
+        const HP_Y = 18;
+
+        for (let i = 0; i < MAX_HP; i++) {
+          ctx.fillStyle = i < hp1 ? hpColor(hp1) : 'rgba(80,80,80,0.6)';
+          ctx.fillRect(HP_PAD + i * (HP_BOX + HP_GAP), HP_Y, HP_BOX, HP_BOX);
+        }
+
+        const hp2MeterW = MAX_HP * HP_BOX + (MAX_HP - 1) * HP_GAP;
+        for (let i = 0; i < MAX_HP; i++) {
+          ctx.fillStyle = hp2 >= (MAX_HP - i) ? hpColor(hp2) : 'rgba(80,80,80,0.6)';
+          ctx.fillRect(CANVAS_WIDTH - HP_PAD - hp2MeterW + i * (HP_BOX + HP_GAP), HP_Y, HP_BOX, HP_BOX);
+        }
+
+        const shrink1 = isShrunk(true);
+        const explode1 = hasExplode(true);
+        const bounce1 = hasBounce(true);
+        const growball1 = hasGrowball(true);
+        const segs1 = shrink1
+          ? SHRINK_SEGMENTS
+          : explode1
+            ? EXPLODE_MAX_CHARGES
+            : bounce1
+              ? BOUNCE_MAX_CHARGES
+              : growball1
+                ? GROWBALL_MAX_CHARGES
+                : MAX_SPECIAL;
+        const fill1 = shrink1
+          ? getShrinkSegmentsLeft(true)
+          : explode1
+            ? explodeCharges1
+            : bounce1
+              ? bounceCharges1
+              : growball1
+                ? growballCharges1
+                : special1;
+        const meter1 = getSpecialMeterLayout(true, !!specialSlot1, segs1);
+        for (let i = 0; i < segs1; i++) {
+          const activeColor = shrink1
+            ? SHRINK_BALL_COLOR
+            : explode1
+              ? EXPLODE_BALL_COLOR
+              : bounce1
+                ? BOUNCE_BALL_COLOR
+                : growball1
+                  ? GROWBALL_BALL_COLOR
+                  : '#f00';
+          ctx.fillStyle = i < fill1 ? activeColor : 'rgba(80,80,80,0.6)';
+          ctx.fillRect(meter1.x + i * (HP_BOX + HP_GAP), meter1.y, HP_BOX, HP_BOX);
+        }
+
+        const shrink2 = isShrunk(false);
+        const explode2 = hasExplode(false);
+        const bounce2 = hasBounce(false);
+        const growball2 = hasGrowball(false);
+        const segs2 = shrink2
+          ? SHRINK_SEGMENTS
+          : explode2
+            ? EXPLODE_MAX_CHARGES
+            : bounce2
+              ? BOUNCE_MAX_CHARGES
+              : growball2
+                ? GROWBALL_MAX_CHARGES
+                : MAX_SPECIAL;
+        const fill2 = shrink2
+          ? getShrinkSegmentsLeft(false)
+          : explode2
+            ? explodeCharges2
+            : bounce2
+              ? bounceCharges2
+              : growball2
+                ? growballCharges2
+                : special2;
+        const meter2 = getSpecialMeterLayout(false, !!specialSlot2, segs2);
+        for (let i = 0; i < segs2; i++) {
+          const filled = shrink2 || explode2 || bounce2 || growball2
+            ? fill2 >= (segs2 - i)
+            : special2 >= (MAX_SPECIAL - i);
+          const activeColor = shrink2
+            ? SHRINK_BALL_COLOR
+            : explode2
+              ? EXPLODE_BALL_COLOR
+              : bounce2
+                ? BOUNCE_BALL_COLOR
+                : growball2
+                  ? GROWBALL_BALL_COLOR
+                  : '#00f';
+          ctx.fillStyle = filled ? activeColor : 'rgba(80,80,80,0.6)';
+          ctx.fillRect(meter2.x + i * (HP_BOX + HP_GAP), meter2.y, HP_BOX, HP_BOX);
+        }
+
+        if (countdownUntil !== null) {
+          const remaining = countdownUntil - Date.now();
+          let countdownText = 'SNOW THROW!';
+          if (remaining > 3000) countdownText = '3';
+          else if (remaining > 2000) countdownText = '2';
+          else if (remaining > 1000) countdownText = '1';
+          ctx.fillStyle = 'rgba(0,0,0,0.5)';
+          ctx.fillRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
+          ctx.fillStyle = '#fff';
+          ctx.font = 'bold 72px sans-serif';
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'middle';
+          ctx.fillText(countdownText, CANVAS_WIDTH / 2, CANVAS_HEIGHT / 2);
+        }
+
+        if (gameOver) {
+          ctx.fillStyle = 'rgba(0,0,0,0.6)';
+          ctx.fillRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
+          ctx.fillStyle = '#fff';
+          ctx.font = 'bold 48px sans-serif';
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'middle';
+          ctx.fillText(gameOver.winnerColor + ' wins!', CANVAS_WIDTH / 2, CANVAS_HEIGHT / 2);
+        }
+
+        if (paused) {
+          ctx.fillStyle = 'rgba(0,0,0,0.55)';
+          ctx.fillRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
+          ctx.fillStyle = '#fff';
+          ctx.font = 'bold 48px sans-serif';
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'middle';
+          ctx.fillText('paused', CANVAS_WIDTH / 2, CANVAS_HEIGHT / 2);
+        }
+      }
+
+      function onKeyDown(e) {
+        const key = e.key.length === 1 ? e.key.toLowerCase() : e.key;
+        if (['a', 'd', 'w', 's', 'j', 'l', 'i', 'k', ' '].includes(key)) {
+          e.preventDefault();
+        }
+        if (paused) return;
+        const inCountdown = countdownUntil !== null && Date.now() < countdownUntil;
+        if (
+          key === 's' &&
+          !keys['s'] &&
+          !inCountdown &&
+          respawnAt === null &&
+          Date.now() >= ballAvailableAt &&
+          Date.now() >= throwBlockedUntilBoth
+        ) {
+          playSound('sound/throw2.wav');
+          const pos = getHeldBallCenter();
+          const isExplode = hasExplode(true);
+          const isBounce = !isExplode && hasBounce(true);
+          const isGrowball = !isExplode && !isBounce && hasGrowball(true);
+          const isShrink = !isExplode && !isBounce && !isGrowball && isShrunk(true);
+          thrownBalls.push({
+            x: pos.x,
+            y: pos.y,
+            speed: THROW_SPEED,
+            owner: 1,
+            isExplode,
+            isBounce,
+            isGrowball,
+            isShrink
+          });
+          if (isExplode) {
+            explodeCharges1--;
+            if (explodeCharges1 <= 0) finishExplodePowerup(true);
+          } else if (isBounce) {
+            bounceCharges1--;
+            if (bounceCharges1 <= 0) finishBouncePowerup(true);
+          } else if (isGrowball) {
+            growballCharges1--;
+            if (growballCharges1 <= 0) finishGrowballPowerup(true);
+          }
+          ballAvailableAt = Date.now() + BALL_RESPAWN_MS;
+        }
+        if (
+          key === 'k' &&
+          !keys['k'] &&
+          !inCountdown &&
+          respawnAt2 === null &&
+          Date.now() >= ballAvailableAt2 &&
+          Date.now() >= throwBlockedUntilBoth
+        ) {
+          playSound('sound/throw2.wav');
+          const pos = getHeldBallCenter2();
+          const isExplode = hasExplode(false);
+          const isBounce = !isExplode && hasBounce(false);
+          const isGrowball = !isExplode && !isBounce && hasGrowball(false);
+          const isShrink = !isExplode && !isBounce && !isGrowball && isShrunk(false);
+          thrownBalls.push({
+            x: pos.x,
+            y: pos.y,
+            speed: -THROW_SPEED,
+            owner: 2,
+            isExplode,
+            isBounce,
+            isGrowball,
+            isShrink
+          });
+          if (isExplode) {
+            explodeCharges2--;
+            if (explodeCharges2 <= 0) finishExplodePowerup(false);
+          } else if (isBounce) {
+            bounceCharges2--;
+            if (bounceCharges2 <= 0) finishBouncePowerup(false);
+          } else if (isGrowball) {
+            growballCharges2--;
+            if (growballCharges2 <= 0) finishGrowballPowerup(false);
+          }
+          ballAvailableAt2 = Date.now() + BALL_RESPAWN_MS;
+        }
+        if (!(inCountdown && (key === 'w' || key === 'i'))) {
+          keys[key] = true;
+        }
+      }
+
+      function onKeyUp(e) {
+        const key = e.key.length === 1 ? e.key.toLowerCase() : e.key;
+        keys[key] = false;
+      }
+
+      function gameLoop(now) {
+        if (!lastFrameTime) lastFrameTime = now;
+        let dt = (now - lastFrameTime) / FRAME_MS;
+        lastFrameTime = now;
+        if (dt < 0) dt = 0;
+        if (dt > MAX_DT) dt = MAX_DT;
+
+        if (!gameStarted) {
+          updateStartScreen(dt);
+          draw();
+          requestAnimationFrame(gameLoop);
+          return;
+        }
+        if (paused) {
+          draw();
+          requestAnimationFrame(gameLoop);
+          return;
+        }
+        update(dt);
+        syncSpecialSlotOverlays();
+        draw();
+        requestAnimationFrame(gameLoop);
+      }
+
+      function startGame() {
+        if (gameStarted) return;
+        gameStarted = true;
+        setLavaOverlayVisible(true);
+        playBgMusic();
+        newGame();
+      }
+
+      document.addEventListener('keydown', function (e) {
+        const key = e.key.length === 1 ? e.key.toLowerCase() : e.key;
+        if (!gameStarted) {
+          if (['a', 'd', 's', 'w', 'j', 'l', 'k', 'i'].includes(key)) {
+            e.preventDefault();
+          }
+          if (key === 'w' || key === 'i') {
+            keys[key] = true;
+          } else if (key === 'a') {
+            rojoHatIndex = cycleHatIndex(rojoHatIndex, -1, ROJO_HAT_OPTIONS.length);
+          } else if (key === 'd') {
+            rojoHatIndex = cycleHatIndex(rojoHatIndex, 1, ROJO_HAT_OPTIONS.length);
+          } else if (key === 'j') {
+            azulHatIndex = cycleHatIndex(azulHatIndex, -1, AZUL_HAT_OPTIONS.length);
+          } else if (key === 'l') {
+            azulHatIndex = cycleHatIndex(azulHatIndex, 1, AZUL_HAT_OPTIONS.length);
+          } else if (key === 's') {
+            if (!rojoReady) {
+              rojoReady = true;
+              throwLobbyBall(true);
+            }
+          } else if (key === 'k') {
+            if (!azulReady) {
+              azulReady = true;
+              throwLobbyBall(false);
+            }
+          }
+          if (rojoReady && azulReady && startGameAt === null) {
+            // Let both ready throws travel briefly before the match countdown
+            startGameAt = Date.now() + 675;
+          }
+          return;
+        }
+        if (key === ' ' || e.code === 'Space') {
+          e.preventDefault();
+          setPaused(!paused);
+          return;
+        }
+        onKeyDown(e);
+      });
+      document.addEventListener('keyup', onKeyUp);
+      window.addEventListener('blur', clearHeldKeys);
+      document.addEventListener('visibilitychange', function () {
+        if (document.hidden) clearHeldKeys();
+      });
+      placePlayersOnStartFloor();
+      ballAvailableAt = 0;
+      ballAvailableAt2 = 0;
+      if (!SHOW_START_SCREEN) startGame();
+      requestAnimationFrame(gameLoop);
+    })();
+  </script>
+</body>
+</html>
