@@ -1,0 +1,34 @@
+---
+description: Always play GIFs via DOM overlays or CSS — never canvas drawImage
+alwaysApply: true
+---
+
+# Animated GIFs
+
+GIFs in this project exist for animation quality. If a `.gif` is on screen, it must play.
+
+Canvas `drawImage()` only paints frame 1 and freezes the rest. Never draw a GIF onto canvas.
+
+## Moving sprites
+
+Use a real `<img>` overlay, positioned over the canvas, and remove it on hit, despawn, or reset.
+
+Match `createBeeElement` / hearts / explosions in `public/games/dynamite/game.js` and `makeExplosionEl` / coin overlays in `public/games/snow-throw/index.html`.
+
+```js
+// BAD — frozen
+ctx.drawImage(beeImg, bee.x, bee.y, size, size);
+
+// GOOD — plays
+el.src = 'images/bee.gif';
+el.style.left = (canvas.offsetLeft + bee.x) + 'px';
+el.style.top = (canvas.offsetTop + bee.y) + 'px';
+```
+
+## Full-bleed or static decoration
+
+Use CSS `background-image` (Dynamite `tree.gif`, Snow Throw `lava2.gif`, site vibe backgrounds).
+
+## Do not inspect GIF binaries
+
+Do not `Read` GIF files in chat. Vision rejects animated GIFs and can stall the thread. Use the path/filename only.

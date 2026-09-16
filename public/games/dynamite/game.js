@@ -16,7 +16,13 @@ const LEVELS = {
     4: { color: '#8B0000', beeSpeedMultiplier: 3, spawnInterval: 1000 },    // Dark Red
     5: { color: '#000000', beeSpeedMultiplier: 4, spawnInterval: 500 }      // Black
 };
-let currentLevel = 1;
+function parseStartLevel() {
+    const raw = new URLSearchParams(window.location.search).get('level');
+    const level = Number.parseInt(raw, 10);
+    return LEVELS[level] ? level : 1;
+}
+const startLevel = parseStartLevel();
+let currentLevel = startLevel;
 let beesPassed = 0;
 const BEES_PER_LEVEL = 10;
 
@@ -101,6 +107,11 @@ window.addEventListener('keydown', (e) => {
         return;
     }
 
+    if (e.key >= '1' && e.key <= '5') {
+        jumpToLevel(Number(e.key));
+        return;
+    }
+
     switch(e.key) {
         case 'ArrowLeft':
             keys.left = true;
@@ -131,8 +142,8 @@ window.addEventListener('keyup', (e) => {
 // Bee properties
 const bees = [];
 
-// Load GIFs once into the DOM so frames animate; redrawing a new Image
-// every frame never finished loading the jellyfish sprite.
+// Canvas drawImage freezes GIFs on frame 1. Hearts, explosions, and
+// Snow Throw overlays animate because they are real <img> elements.
 function loadAnimatedGif(src) {
     const img = new Image();
     img.src = src;
@@ -147,11 +158,99 @@ function canDrawImage(img) {
     return img.complete && img.naturalWidth > 0;
 }
 
-const beeImg = loadAnimatedGif('images/bee.gif');
-const jellyImg = loadAnimatedGif('images/jellyfish.gif');
+const BEE_SRC = 'images/bee.gif';
+const JELLY_SRC = 'images/jellyfish.gif';
 const bubblesImg = loadAnimatedGif('images/bubbles.gif');
 const BEE_SIZE = 48;
 const JELLY_SIZE = BEE_SIZE * 1.5;
+// Native pixel size of jellyfish.gif. Sub-frame GIFs must composite at
+// this size; CSS width/height stretching freezes or fragments them.
+const JELLY_NATIVE_W = 357;
+const JELLY_NATIVE_H = 140;
+
+function spriteKind() {
+    return currentLevel === 2 ? 'jelly' : 'bee';
+}
+
+function spriteDims(img) {
+    if (spriteKind() === 'jelly') {
+        const nw = img?.naturalWidth || JELLY_NATIVE_W;
+        const nh = img?.naturalHeight || JELLY_NATIVE_H;
+        const h = JELLY_SIZE;
+        return { w: h * (nw / nh), h, nw, nh };
+    }
+    return { w: BEE_SIZE, h: BEE_SIZE };
+}
+
+function createBeeElement() {
+    const wrap = document.createElement('div');
+    const img = document.createElement('img');
+    const kind = spriteKind();
+    img.alt = '';
+    img.src = kind === 'jelly' ? JELLY_SRC : BEE_SRC;
+    wrap.dataset.kind = kind;
+    wrap.style.cssText = 'position:absolute;pointer-events:none;z-index:1;visibility:hidden;';
+    wrap.appendChild(img);
+    document.body.appendChild(wrap);
+    wrap._img = img;
+    return wrap;
+}
+
+function removeBeeAt(i) {
+    const bee = bees[i];
+    if (bee?.el) bee.el.remove();
+    bees.splice(i, 1);
+}
+
+function clearBees() {
+    for (const bee of bees) {
+        if (bee.el) bee.el.remove();
+    }
+    bees.length = 0;
+}
+
+function syncBeeSprites() {
+    const playing = gameState === 'playing';
+    const kind = spriteKind();
+    const src = kind === 'jelly' ? JELLY_SRC : BEE_SRC;
+    for (const bee of bees) {
+        const wrap = bee.el;
+        if (!wrap) continue;
+        const img = wrap._img;
+        if (!playing) {
+            wrap.style.visibility = 'hidden';
+            continue;
+        }
+        if (wrap.dataset.kind !== kind) {
+            wrap.dataset.kind = kind;
+            img.src = src;
+        }
+        wrap.style.visibility = 'visible';
+        wrap.style.left = (canvas.offsetLeft + bee.x) + 'px';
+        wrap.style.top = (canvas.offsetTop + bee.y) + 'px';
+
+        if (kind === 'jelly') {
+            const { h, nw, nh } = spriteDims(img);
+            // Keep the img at native GIF size so partial frames composite,
+            // then scale the wrapper (post-composite) down to game size.
+            img.style.width = nw + 'px';
+            img.style.height = nh + 'px';
+            img.style.maxWidth = 'none';
+            img.style.transform = 'none';
+            wrap.style.width = nw + 'px';
+            wrap.style.height = nh + 'px';
+            wrap.style.transformOrigin = '0 0';
+            wrap.style.transform = 'scale(' + (h / nh) + ')';
+        } else {
+            wrap.style.width = BEE_SIZE + 'px';
+            wrap.style.height = BEE_SIZE + 'px';
+            wrap.style.transform = 'none';
+            img.style.width = BEE_SIZE + 'px';
+            img.style.height = BEE_SIZE + 'px';
+            img.style.transform = 'none';
+        }
+    }
+}
 
 // Add heart image
 const heartImg = new Image();
@@ -168,6 +267,7 @@ function createHeartElement() {
     heart.style.width = '30px';
     heart.style.height = '30px';
     heart.style.pointerEvents = 'none';
+    heart.style.zIndex = '3';
     heart.style.display = 'none'; // Start hidden
     document.body.appendChild(heart);
     return heart;
@@ -189,6 +289,7 @@ pauseButton.style.padding = '5px 10px';
 pauseButton.style.cursor = 'pointer';
 pauseButton.style.backgroundColor = 'transparent';
 pauseButton.style.border = 'none';
+pauseButton.style.zIndex = '4';
 document.body.appendChild(pauseButton);
 
 pauseButton.addEventListener('click', () => {
@@ -215,6 +316,7 @@ function createExplosion(x, y) {
     explosionImg.style.width = '100px';
     explosionImg.style.height = '100px';
     explosionImg.style.pointerEvents = 'none';
+    explosionImg.style.zIndex = '2';
     document.body.appendChild(explosionImg);
     
     // Remove the explosion after animation completes
@@ -240,7 +342,8 @@ function spawnBee() {
         frequency,
         phase: Math.random() * Math.PI * 2,
         t: 0,
-        waveSpeed: 0.04 + Math.random() * 0.04 // how fast the wave changes
+        waveSpeed: 0.04 + Math.random() * 0.04, // how fast the wave changes
+        el: createBeeElement()
     });
 }
 
@@ -253,15 +356,11 @@ function startBeeSpawning() {
     spawnIntervalId = setInterval(spawnBee, LEVELS[currentLevel].spawnInterval);
 }
 
-function spriteSize() {
-    return currentLevel === 2 ? JELLY_SIZE : BEE_SIZE;
-}
-
 function checkCollision(player, bee) {
-    const size = spriteSize();
-    return player.x < bee.x + size &&
+    const { w, h } = spriteDims(bee.el?._img);
+    return player.x < bee.x + w &&
            player.x + player.width > bee.x &&
-           player.y < bee.y + size &&
+           player.y < bee.y + h &&
            player.y + player.height > bee.y;
 }
 
@@ -278,7 +377,7 @@ function updateBees() {
             player.hitPoints--;
             // Create explosion at collision point
             createExplosion(bee.x, bee.y);
-            bees.splice(i, 1);
+            removeBeeAt(i);
             
             // Play different sounds based on level
             if (currentLevel === 2) {
@@ -294,11 +393,12 @@ function updateBees() {
             if (player.hitPoints <= 0) {
                 gameState = 'gameOver';
             }
+            continue;
         }
         
         // Remove bee if it goes off screen
-        if (bee.x < -60) {
-            bees.splice(i, 1);
+        if (bee.x < -spriteDims(bee.el?._img).w) {
+            removeBeeAt(i);
             score++;
             beesPassed++;
             scoreSound.currentTime = 0;
@@ -370,6 +470,7 @@ function updatePlayer() {
 function draw() {
     // Clear canvas
     ctx.clearRect(0, 0, canvas.width, canvas.height);
+    syncBeeSprites();
 
     if (gameState === 'start') {
         // Draw start screen
@@ -424,29 +525,6 @@ function draw() {
     // Draw ground
     ctx.fillStyle = '#67C23A';
     ctx.fillRect(0, ground, canvas.width, canvas.height - ground);
-
-    // Draw bees
-    for (const bee of bees) {
-        if (currentLevel === 2) {
-            // For level 2, draw jelly with counter-clockwise 90 degree rotation
-            const half = JELLY_SIZE / 2;
-            ctx.save();
-            ctx.translate(bee.x + half, bee.y + half);
-            // ctx.rotate(-Math.PI / 2); // Rotate counter-clockwise 90 degrees
-            if (canDrawImage(jellyImg)) {
-                ctx.drawImage(jellyImg, -half, -half, JELLY_SIZE, JELLY_SIZE);
-            } else {
-                ctx.fillStyle = '#7DF9FF';
-                ctx.beginPath();
-                ctx.ellipse(0, 0, 21, 30, 0, 0, Math.PI * 2);
-                ctx.fill();
-            }
-            ctx.restore();
-        } else {
-            // For other levels, draw bees normally
-            ctx.drawImage(beeImg, bee.x, bee.y, BEE_SIZE, BEE_SIZE);
-        }
-    }
 
     // Draw player
     if (player.isBlinking && player.blinkCount % 2 === 0) {
@@ -516,15 +594,23 @@ function draw() {
     ctx.fillText(`Level ${currentLevel}`, canvas.width - 20, 30);
 }
 
+function jumpToLevel(level) {
+    if (!LEVELS[level]) return;
+    currentLevel = level;
+    clearBees();
+    beesPassed = 0;
+    startBeeSpawning();
+}
+
 function resetGame() {
     player.x = 50;
     player.y = canvas.height - 50;
     player.velocityY = 0;
     player.isJumping = false;
     player.hitPoints = 10;
-    bees.length = 0;
+    clearBees();
     score = 0;
-    currentLevel = 1;
+    currentLevel = startLevel;
     beesPassed = 0;
     gameState = 'playing';
     startBeeSpawning();
