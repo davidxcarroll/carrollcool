@@ -9,9 +9,9 @@ type Game = {
 
 const games: Game[] = [
   {
-    href: "#",
-    title: "TBD!",
-    thumbnail: "",
+    href: "/dynamite",
+    title: "Dynamite",
+    thumbnail: "/images/game-dynamite.png",
   },
   {
     href: "/snow-throw",
@@ -19,9 +19,9 @@ const games: Game[] = [
     thumbnail: "/images/game-snowthrow.png",
   },
   {
-    href: "/dynamite",
-    title: "Dynamite",
-    thumbnail: "/images/game-dynamite.png",
+    href: "#",
+    title: "TBD!",
+    thumbnail: "",
   },
 ];
 
@@ -30,7 +30,7 @@ export default function Home() {
     <main className="min-h-dvh mix-blend-difference flex flex-col items-center justify-center gap-y-12 pb-24 blur-[0.5px]">
 
       {/* INTRO */}
-      <h1 className="text-center sm:text-[20em] text-[12em] leading-none font-montreal-bold-italic-ultra-squeezed uppercase">
+      <h1 className="text-center sm:text-[20em] text-[10em] leading-none font-montreal-bold-italic-ultra-squeezed uppercase">
         Carroll.cool
       </h1>
 
@@ -41,7 +41,7 @@ export default function Home() {
           Cool <span className="italic">👾</span> games
         </p>
         {/* LIST */}
-        <ul className="xl:w-5xl w-full grid md:grid-cols-3 grid-cols-2 gap-x-4 gap-y-10 sm:gap-x-8 p-2">
+        <ul className="xl:w-5xl w-full grid lg:grid-cols-3 md:grid-cols-2 grid-cols-1 gap-x-4 gap-y-10 sm:gap-x-8 py-4 px-16">
           {games.map((game) => (
             <li key={game.href}>
               <Link href={game.href} className="group block">
