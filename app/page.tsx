@@ -76,11 +76,11 @@ export default function Home() {
         </p>
       </div>
 
-      {/* ART */}
+      {/* MUSIC */}
       <div className="w-full max-w-2xl flex flex-col items-center justify-center gap-y-4 mb-12">
         <hr className="w-full border-t-2 border-white" />
         <p className="px-2 lg:text-7xl md:text-6xl sm:text-5xl text-4xl text-center leading-none uppercase">
-          Cool <span className="italic">🎨</span> art
+          Cool <span className="italic">🎼</span> music
         </p>
         <p className="px-2 lg:text-7xl md:text-6xl sm:text-5xl text-4xl text-center leading-none uppercase">
           Coming soon...
